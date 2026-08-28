@@ -3,16 +3,17 @@
 from pathlib import Path
 import pytest
 from croissant_baker.handlers.csv_handler import CSVHandler
+from croissant_baker.sources import make_source
 
 
 def test_csv_handler_can_handle() -> None:
     """Test CSV handler file type detection."""
     handler = CSVHandler()
 
-    assert handler.can_handle(Path("test.csv"))
-    assert handler.can_handle(Path("data.CSV"))
-    assert handler.can_handle(Path("data.csv.gz"))
-    assert not handler.can_handle(Path("test.txt"))
+    assert handler.claims(make_source(Path("test.csv")))
+    assert handler.claims(make_source(Path("data.CSV")))
+    assert handler.claims(make_source(Path("data.csv.gz")))
+    assert not handler.claims(make_source(Path("test.txt")))
 
 
 def test_csv_handler_extract_metadata(tmp_path: Path) -> None:
@@ -22,7 +23,7 @@ def test_csv_handler_extract_metadata(tmp_path: Path) -> None:
     csv_file.write_text(csv_content)
 
     handler = CSVHandler()
-    metadata = handler.extract_metadata(csv_file)
+    metadata = handler.extract(make_source(csv_file))
 
     assert metadata["encoding_format"] == "text/csv"
     assert metadata["file_name"] == "test.csv"
@@ -43,7 +44,7 @@ def test_csv_handler_count_rows(tmp_path: Path) -> None:
     csv_file.write_text(csv_content)
 
     handler = CSVHandler()
-    metadata = handler.extract_metadata(csv_file, count_rows=True)
+    metadata = handler.extract(make_source(csv_file), count_rows=True)
 
     assert metadata["num_rows"] == 2
 
@@ -55,7 +56,7 @@ def test_csv_handler_empty_file(tmp_path: Path) -> None:
 
     handler = CSVHandler()
     with pytest.raises(ValueError):
-        handler.extract_metadata(empty_csv)
+        handler.extract(make_source(empty_csv))
 
 
 def test_csv_handler_data_types(tmp_path: Path) -> None:
@@ -65,7 +66,7 @@ def test_csv_handler_data_types(tmp_path: Path) -> None:
     csv_file.write_text(csv_content)
 
     handler = CSVHandler()
-    metadata = handler.extract_metadata(csv_file)
+    metadata = handler.extract(make_source(csv_file))
 
     column_types = metadata["column_types"]
     assert column_types["bool_col"] == "sc:Boolean"
@@ -160,7 +161,7 @@ def test_parse_conflict_unknown_falls_back_to_all_string(tmp_path: Path) -> None
     with patch.object(CSVHandler, "_parse_conflict", return_value=(None, None)):
         with patch.object(CSVHandler, "_header", return_value=["a", "b", "c"]):
             with patch.object(CSVHandler, "_read_streaming", side_effect=fake_read):
-                meta = CSVHandler().extract_metadata(csv_file)
+                meta = CSVHandler().extract(make_source(csv_file))
 
     assert meta["column_types"] == {"a": "sc:Text", "b": "sc:Text", "c": "sc:Text"}
     assert seen_overrides == [{}, {"a": "string", "b": "string", "c": "string"}]
@@ -179,4 +180,4 @@ def test_no_fd_leak_on_schema_only_reads(tmp_path: Path) -> None:
 
     handler = CSVHandler()
     for f in files:
-        handler.extract_metadata(f, count_rows=False)
+        handler.extract(make_source(f), count_rows=False)

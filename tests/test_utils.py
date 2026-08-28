@@ -1,8 +1,10 @@
 """Tests for handler utilities."""
 
 from croissant_baker.handlers.utils import (
+    ARRAY_SHAPE_UNKNOWN_1D,
     _disambiguate_ids,
     make_field_id,
+    normalize_array_shape,
 )
 
 
@@ -86,3 +88,14 @@ def test_make_field_id_collision_appends_numeric_suffix() -> None:
     # Both ids are recorded so a third collision continues the sequence.
     third = make_field_id("rs1", "Age=30", used)
     assert third == "rs1/Age_30__2"
+
+
+def test_normalize_array_shape_accepts_tuple_and_bare_forms() -> None:
+    """Tuple-style shapes (numpy.shape repr) coerce to mlc-accepted form."""
+    assert normalize_array_shape(ARRAY_SHAPE_UNKNOWN_1D) == "-1"
+    assert normalize_array_shape("-1") == "-1"
+    assert normalize_array_shape("(-1,)") == "-1"
+    assert normalize_array_shape("(-1, -1)") == "-1,-1"
+    assert normalize_array_shape("(28, 28)") == "28,28"
+    assert normalize_array_shape("28,28") == "28,28"
+    assert normalize_array_shape("-1,-1,3") == "-1,-1,3"

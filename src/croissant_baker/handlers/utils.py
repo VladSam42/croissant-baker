@@ -1,15 +1,17 @@
 """Shared utilities for file handlers."""
 
-import gzip
-import hashlib
 import logging
 import re
+import warnings
 from pathlib import Path
 from typing import Dict, Union
+
 
 import mlcroissant as mlc
 import pyarrow as pa
 import pyarrow.types as patypes
+
+from croissant_baker.sources import hash_file
 
 logger = logging.getLogger(__name__)
 
@@ -45,18 +47,25 @@ def normalize_array_shape(shape: str) -> str:
 
 
 def open_text_file(file_path: Path):
-    """Return a text file handle, transparently decompressing gzip files."""
-    if file_path.name.lower().endswith(".gz"):
-        return gzip.open(file_path, "rt", encoding="utf-8-sig")
-    return open(file_path, "r", encoding="utf-8-sig")
+    """Deprecated. Read through :meth:`FileSource.open_text` instead.
+
+    Kept so a handler written against the previous contract still imports and
+    runs. It resolves compression the same way the pipeline does.
+    """
+    from croissant_baker import compression
+
+    warnings.warn(
+        "croissant_baker.handlers.utils.open_text_file is deprecated; read "
+        "through FileSource.open_text(), which is already decompressed.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return compression.open_text(Path(file_path))
 
 
 # Characters that are invalid in Croissant @id values.
 # mlcroissant rejects whitespace and URI-unsafe characters like >, (, ), %.
 _INVALID_ID_CHARS = re.compile(r"[^A-Za-z0-9_.\-]")
-
-# Read files in 64 KB chunks for hashing — power-of-2 aligns with OS page cache.
-_HASH_CHUNK_SIZE = 64 * 1024
 
 
 def sanitize_id(raw: str) -> str:
@@ -306,6 +315,10 @@ def compute_file_hash(file_path: Union[str, Path]) -> str:
     Reads the file as-is on disk (compressed bytes included) rather than
     decompressing first. This matches what users download and verify.
 
+    Handlers take their own file's digest from ``source.sha256``. This stays
+    for files a handler discovers itself, such as WFDB's sibling ``.dat`` and
+    ``.atr``.
+
     Args:
         file_path: Path to the file (str or Path object)
 
@@ -316,9 +329,7 @@ def compute_file_hash(file_path: Union[str, Path]) -> str:
         FileNotFoundError: If the file doesn't exist
         PermissionError: If the file cannot be read
     """
-    # Convert to Path only if needed
-    if isinstance(file_path, str):
-        file_path = Path(file_path)
+    file_path = Path(file_path)
 
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -327,17 +338,9 @@ def compute_file_hash(file_path: Union[str, Path]) -> str:
         raise ValueError(f"Path is not a file: {file_path}")
 
     try:
-        sha256_hash = hashlib.sha256()
-        # Hash the file as-is on disk (compressed bytes). This matches what users
-        # download and verify, and avoids decompressing gigabytes just for hashing.
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(_HASH_CHUNK_SIZE), b""):
-                sha256_hash.update(chunk)
-
-        return sha256_hash.hexdigest()
-
-    except (IOError, OSError) as e:
-        raise PermissionError(f"Cannot read file {file_path}: {e}")
+        return hash_file(file_path)
+    except PermissionError as e:
+        raise PermissionError(f"Cannot read file {file_path}: {e}") from e
 
 
 def _build_fields(
@@ -602,6 +605,17 @@ def build_fields_from_json_schema(
     return fields
 
 
+def display_name(meta: dict) -> str:
+    """What a description should call this file: its name as stored on disk.
+
+    Identifiers come from the logical name, so ``sample.csv`` and
+    ``sample.csv.gz`` describe one table; prose names the file the reader can
+    find. The generator supplies ``stored_name``; ``file_name`` is the fallback
+    for a handler invoked outside the pipeline.
+    """
+    return meta.get("stored_name") or meta.get("file_name", "unknown")
+
+
 def get_clean_record_name(file_name: str) -> str:
     """
     Generate a clean record set name from a file name.
@@ -620,16 +634,6 @@ def get_clean_record_name(file_name: str) -> str:
         return str(file_name) if file_name else "unknown"
 
     name = file_name.strip()
-
-    # Remove common compression extensions first
-    if name.endswith(".gz"):
-        name = name[:-3]
-    elif name.endswith(".bz2"):
-        name = name[:-4]
-    elif name.endswith(".xz"):
-        name = name[:-3]
-    elif name.endswith(".zip"):
-        name = name[:-4]
 
     # Remove common data file extensions
     extensions = [".csv", ".tsv", ".ndjson", ".json", ".parquet", ".txt", ".dat"]

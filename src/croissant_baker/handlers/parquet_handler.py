@@ -8,10 +8,11 @@ import mlcroissant as mlc
 from pyarrow.parquet import ParquetFile
 
 from croissant_baker.handlers.base_handler import FileTypeHandler
+from croissant_baker.sources import FileSource
 from croissant_baker.handlers.utils import (
     _build_fields,
     _disambiguate_ids,
-    compute_file_hash,
+    display_name,
     get_clean_record_name,
     infer_column_types_from_arrow_schema,
     make_field_id,
@@ -29,39 +30,54 @@ _PARQUET_MAGIC = b"PAR1"
 _PARQUET_MAGIC_LEN = len(_PARQUET_MAGIC)
 
 
-def _has_parquet_magic(file_path: Path) -> bool:
-    """Return True iff ``file_path`` has the Parquet magic at start and end.
+def _tail(stream, size: int) -> bytes:
+    """Return the last ``size`` bytes of ``stream`` from its current position.
+
+    Seeks from the end when the stream allows it. A stream that refuses — gzip
+    in read mode — is read forward keeping a rolling tail: one pass, constant
+    memory.
+    """
+    try:
+        stream.seek(-size, 2)
+        return stream.read(size)
+    except (OSError, ValueError):
+        tail = b""
+        while chunk := stream.read(1 << 20):
+            tail = (tail + chunk)[-size:]
+        return tail
+
+
+def _has_parquet_magic(source: FileSource) -> bool:
+    """Return True iff ``source`` has the Parquet magic at start and end.
 
     Files that fail any check (too small, missing PAR1 header, missing PAR1
     footer) are rejected and a WARNING is logged with the specific reason so
     the user can see which files were skipped and why. Missing or unreadable
-    files return False without logging (caller errors, not impostors).
+    files return False without logging (caller errors, not impostors). The
+    footer check costs a full pass on a compressed file.
     """
-    try:
-        size = file_path.stat().st_size
-    except OSError:
+    if not source.exists:
         return False
-    if size < _PARQUET_MAGIC_LEN * 2:
+    if source.size < _PARQUET_MAGIC_LEN * 2:
         logger.warning(
             "Skipping %s: file is too small (%d bytes) to be a valid Parquet file",
-            file_path,
-            size,
+            source.relative_path,
+            source.size,
         )
         return False
     try:
-        with open(file_path, "rb") as f:
+        with source.open() as f:
             if f.read(_PARQUET_MAGIC_LEN) != _PARQUET_MAGIC:
                 logger.warning(
                     "Skipping %s: missing Parquet PAR1 header magic",
-                    file_path,
+                    source.relative_path,
                 )
                 return False
-            f.seek(-_PARQUET_MAGIC_LEN, 2)
-            if f.read(_PARQUET_MAGIC_LEN) != _PARQUET_MAGIC:
+            if _tail(f, _PARQUET_MAGIC_LEN) != _PARQUET_MAGIC:
                 logger.warning(
                     "Skipping %s: missing Parquet PAR1 footer magic "
                     "(file may be truncated)",
-                    file_path,
+                    source.relative_path,
                 )
                 return False
             return True
@@ -83,18 +99,18 @@ class ParquetHandler(FileTypeHandler):
     FORMAT_NAME = "Parquet"
     FORMAT_DESCRIPTION = "Arrow schema, column names and types, row count"
 
-    def can_handle(self, file_path: Path) -> bool:
-        if file_path.suffix.lower() != ".parquet":
+    def claims(self, source: FileSource) -> bool:
+        if source.suffix != ".parquet":
             return False
-        return _has_parquet_magic(file_path)
+        return _has_parquet_magic(source)
 
-    def extract_metadata(self, file_path: Path, **kwargs) -> dict:
+    def extract(self, source: FileSource, **kwargs) -> dict:
         """Extract metadata from a Parquet file via pyarrow schema inspection."""
-        if not file_path.exists():
-            raise FileNotFoundError(f"Parquet file not found: {file_path}")
+        if not source.exists:
+            raise FileNotFoundError(f"Parquet file not found: {source.relative_path}")
 
         try:
-            with ParquetFile(str(file_path)) as pq:
+            with source.open() as stream, ParquetFile(stream) as pq:
                 schema = pq.schema_arrow
                 num_rows = pq.metadata.num_rows if pq.metadata is not None else 0
 
@@ -102,14 +118,10 @@ class ParquetHandler(FileTypeHandler):
                 column_types = infer_column_types_from_arrow_schema(schema)
                 columns = [field.name for field in schema]
 
-            file_size = file_path.stat().st_size
-            sha256_hash = compute_file_hash(file_path)
-
             return {
-                "file_path": str(file_path),
-                "file_name": file_path.name,
-                "file_size": file_size,
-                "sha256": sha256_hash,
+                "file_name": source.name,
+                "file_size": source.size,
+                "sha256": source.sha256,
                 "encoding_format": "application/vnd.apache.parquet",
                 "column_types": column_types,
                 "arrow_schema": schema,
@@ -118,7 +130,9 @@ class ParquetHandler(FileTypeHandler):
                 "columns": columns,
             }
         except Exception as e:
-            raise ValueError(f"Failed to process Parquet file {file_path}: {e}") from e
+            raise ValueError(
+                f"Failed to process Parquet file {source.relative_path}: {e}"
+            ) from e
 
     def build_croissant(self, file_metas: list, file_ids: list) -> tuple:
         """Build FileSets and RecordSets for all Parquet files in this dataset.
@@ -257,7 +271,7 @@ class ParquetHandler(FileTypeHandler):
                                 mlc.Field(
                                     id=field_id,
                                     name=col_name,
-                                    description=f"Column '{col_name}' from {file_meta['file_name']}",
+                                    description=f"Column '{col_name}' from {display_name(file_meta)}",
                                     data_types=[col_type],
                                     source=mlc.Source(
                                         file_object=file_id,
@@ -272,7 +286,7 @@ class ParquetHandler(FileTypeHandler):
                         mlc.RecordSet(
                             id=rs_id,
                             name=rs_name,
-                            description=f"Records from {file_meta['file_name']}{row_desc}",
+                            description=f"Records from {display_name(file_meta)}{row_desc}",
                             fields=fields,
                         )
                     )

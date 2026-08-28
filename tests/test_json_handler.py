@@ -12,6 +12,7 @@ import pytest
 
 from croissant_baker.handlers.json_handler import JSONHandler
 from croissant_baker.handlers.registry import find_handler, register_all_handlers
+from croissant_baker.sources import make_source
 
 
 # ---------------------------------------------------------------------------
@@ -61,49 +62,44 @@ class TestCanHandle:
     def test_plain_json_array(self, tmp_path: Path) -> None:
         p = tmp_path / "data.json"
         _write_json(p, _SAMPLE_ROWS)
-        assert JSONHandler().can_handle(p) is True
+        assert JSONHandler().claims(make_source(p)) is True
 
     def test_plain_json_object(self, tmp_path: Path) -> None:
         p = tmp_path / "config.json"
         _write_json(p, {"key": "value"})
-        assert JSONHandler().can_handle(p) is True
+        assert JSONHandler().claims(make_source(p)) is True
 
     def test_fhir_json_rejected(self, tmp_path: Path) -> None:
         """FHIR JSON files (resourceType starts uppercase) must be rejected."""
         p = tmp_path / "bundle.json"
         _write_json(p, _FHIR_BUNDLE)
-        assert JSONHandler().can_handle(p) is False
+        assert JSONHandler().claims(make_source(p)) is False
 
     def test_fhir_lowercase_resource_type_accepted(self, tmp_path: Path) -> None:
         """A file with resourceType starting with lowercase is NOT FHIR — accept it."""
         p = tmp_path / "weird.json"
         _write_json(p, {"resourceType": "notFHIR", "data": 1})
-        assert JSONHandler().can_handle(p) is True
+        assert JSONHandler().claims(make_source(p)) is True
 
     def test_jsonl_accepted(self, tmp_path: Path) -> None:
         p = tmp_path / "data.jsonl"
         _write_jsonl(p, _SAMPLE_ROWS)
-        assert JSONHandler().can_handle(p) is True
+        assert JSONHandler().claims(make_source(p)) is True
 
-    def test_jsonl_gz_accepted(self, tmp_path: Path) -> None:
-        p = tmp_path / "data.jsonl.gz"
-        _write_jsonl_gz(p, _SAMPLE_ROWS)
-        assert JSONHandler().can_handle(p) is True
-
-    def test_json_gz_accepted(self, tmp_path: Path) -> None:
-        p = tmp_path / "data.json.gz"
-        _write_json_gz(p, _SAMPLE_ROWS)
-        assert JSONHandler().can_handle(p) is True
+    # There is no wrapped equivalent of these: the handler is given a logical
+    # name, so claims() cannot tell data.jsonl from data.jsonl.gz. That the
+    # pipeline strips the wrapper is asserted end to end in
+    # test_compression_matrix, over every handler and every compression.
 
     def test_csv_rejected(self, tmp_path: Path) -> None:
         p = tmp_path / "data.csv"
         p.write_text("a,b\n1,2\n")
-        assert JSONHandler().can_handle(p) is False
+        assert JSONHandler().claims(make_source(p)) is False
 
     def test_parquet_rejected(self, tmp_path: Path) -> None:
         p = tmp_path / "data.parquet"
         p.write_bytes(b"PAR1")
-        assert JSONHandler().can_handle(p) is False
+        assert JSONHandler().claims(make_source(p)) is False
 
 
 # ---------------------------------------------------------------------------
@@ -115,8 +111,7 @@ class TestExtractMetadataJsonArray:
     def test_basic_fields_present(self, tmp_path: Path) -> None:
         p = tmp_path / "rows.json"
         _write_json(p, _SAMPLE_ROWS)
-        meta = JSONHandler().extract_metadata(p)
-        assert meta["file_path"] == str(p)
+        meta = JSONHandler().extract(make_source(p))
         assert meta["file_name"] == "rows.json"
         assert meta["num_rows"] == len(_SAMPLE_ROWS)
         assert meta["num_columns"] == len(_SAMPLE_ROWS[0])
@@ -127,7 +122,7 @@ class TestExtractMetadataJsonArray:
     def test_column_types(self, tmp_path: Path) -> None:
         p = tmp_path / "typed.json"
         _write_json(p, _SAMPLE_ROWS)
-        meta = JSONHandler().extract_metadata(p)
+        meta = JSONHandler().extract(make_source(p))
         ct = meta["column_types"]
         assert ct["id"] == "cr:Int64"
         assert ct["name"] == "sc:Text"
@@ -137,7 +132,7 @@ class TestExtractMetadataJsonArray:
     def test_file_size_and_sha256(self, tmp_path: Path) -> None:
         p = tmp_path / "rows.json"
         _write_json(p, _SAMPLE_ROWS)
-        meta = JSONHandler().extract_metadata(p)
+        meta = JSONHandler().extract(make_source(p))
         assert meta["file_size"] == p.stat().st_size
         assert isinstance(meta["sha256"], str) and len(meta["sha256"]) == 64
 
@@ -151,7 +146,7 @@ class TestExtractMetadataJsonObject:
     def test_single_object_num_rows_one(self, tmp_path: Path) -> None:
         p = tmp_path / "single.json"
         _write_json(p, {"a": 1, "b": "hello"})
-        meta = JSONHandler().extract_metadata(p)
+        meta = JSONHandler().extract(make_source(p))
         assert meta["num_rows"] == 1
         assert meta["num_columns"] == 2
         assert set(meta["columns"]) == {"a", "b"}
@@ -159,7 +154,7 @@ class TestExtractMetadataJsonObject:
     def test_column_types_single_object(self, tmp_path: Path) -> None:
         p = tmp_path / "single.json"
         _write_json(p, {"ts": "2024-01-15T10:00:00Z", "url": "https://example.com"})
-        meta = JSONHandler().extract_metadata(p)
+        meta = JSONHandler().extract(make_source(p))
         ct = meta["column_types"]
         assert ct["ts"] == "sc:DateTime"
         assert ct["url"] == "sc:URL"
@@ -174,10 +169,9 @@ class TestExtractMetadataJsonl:
     def test_basic_jsonl(self, tmp_path: Path) -> None:
         p = tmp_path / "data.jsonl"
         _write_jsonl(p, _SAMPLE_ROWS)
-        meta = JSONHandler().extract_metadata(p)
+        meta = JSONHandler().extract(make_source(p))
         assert meta["num_rows"] == len(_SAMPLE_ROWS)
         assert meta["encoding_format"] == "application/jsonl"
-        assert meta["file_path"] == str(p)
 
     def test_jsonl_skips_blank_lines(self, tmp_path: Path) -> None:
         p = tmp_path / "sparse.jsonl"
@@ -185,7 +179,7 @@ class TestExtractMetadataJsonl:
             fh.write(json.dumps({"x": 1}) + "\n")
             fh.write("\n")
             fh.write(json.dumps({"x": 2}) + "\n")
-        meta = JSONHandler().extract_metadata(p)
+        meta = JSONHandler().extract(make_source(p))
         assert meta["num_rows"] == 2
 
     def test_jsonl_skips_malformed_lines(self, tmp_path: Path) -> None:
@@ -194,14 +188,14 @@ class TestExtractMetadataJsonl:
             fh.write(json.dumps({"x": 1}) + "\n")
             fh.write("not json\n")
             fh.write(json.dumps({"x": 3}) + "\n")
-        meta = JSONHandler().extract_metadata(p)
+        meta = JSONHandler().extract(make_source(p))
         assert meta["num_rows"] == 2
 
     def test_jsonl_empty_raises(self, tmp_path: Path) -> None:
         p = tmp_path / "empty.jsonl"
         p.write_text("")
         with pytest.raises(ValueError, match="No valid JSON objects"):
-            JSONHandler().extract_metadata(p)
+            JSONHandler().extract(make_source(p))
 
 
 # ---------------------------------------------------------------------------
@@ -213,15 +207,15 @@ class TestExtractMetadataCompressed:
     def test_json_gz_encoding_format(self, tmp_path: Path) -> None:
         p = tmp_path / "data.json.gz"
         _write_json_gz(p, _SAMPLE_ROWS)
-        meta = JSONHandler().extract_metadata(p)
-        assert meta["encoding_format"] == "application/gzip"
+        meta = JSONHandler().extract(make_source(p))
+        assert meta["encoding_format"] == "application/json"
         assert meta["num_rows"] == len(_SAMPLE_ROWS)
 
     def test_jsonl_gz_encoding_format(self, tmp_path: Path) -> None:
         p = tmp_path / "data.jsonl.gz"
         _write_jsonl_gz(p, _SAMPLE_ROWS)
-        meta = JSONHandler().extract_metadata(p)
-        assert meta["encoding_format"] == "application/gzip"
+        meta = JSONHandler().extract(make_source(p))
+        assert meta["encoding_format"] == "application/jsonl"
         assert meta["num_rows"] == len(_SAMPLE_ROWS)
 
 
@@ -238,7 +232,7 @@ class TestExtractMetadataNested:
         ]
         p = tmp_path / "nested.json"
         _write_json(p, rows)
-        meta = JSONHandler().extract_metadata(p)
+        meta = JSONHandler().extract(make_source(p))
         ct = meta["column_types"]
         assert "address" in ct
         assert isinstance(ct["address"], dict)
@@ -249,7 +243,7 @@ class TestExtractMetadataNested:
         rows = [{"tags": ["a", "b"]}, {"tags": ["c"]}]
         p = tmp_path / "arrays.json"
         _write_json(p, rows)
-        meta = JSONHandler().extract_metadata(p)
+        meta = JSONHandler().extract(make_source(p))
         ct = meta["column_types"]
         assert isinstance(ct["tags"], dict)
         assert ct["tags"].get("is_array") is True
@@ -260,7 +254,7 @@ class TestExtractMetadataNested:
         ]
         p = tmp_path / "typed.json"
         _write_json(p, rows)
-        meta = JSONHandler().extract_metadata(p)
+        meta = JSONHandler().extract(make_source(p))
         ct = meta["column_types"]
         assert ct["dob"] == "sc:Date"
         assert ct["profile"] == "sc:URL"
@@ -276,7 +270,7 @@ class TestBuildCroissant:
         rows = [{"col_a": 1, "col_b": "hello"}]
         p = tmp_path / file_name
         _write_json(p, rows)
-        return JSONHandler().extract_metadata(p)
+        return JSONHandler().extract(make_source(p))
 
     def test_returns_empty_distributions(self, tmp_path: Path) -> None:
         meta = self._make_meta(tmp_path)
@@ -300,7 +294,7 @@ class TestBuildCroissant:
         meta1 = self._make_meta(tmp_path, "a.json")
         p2 = tmp_path / "b.jsonl"
         _write_jsonl(p2, [{"x": 1}])
-        meta2 = JSONHandler().extract_metadata(p2)
+        meta2 = JSONHandler().extract(make_source(p2))
         _, record_sets = JSONHandler().build_croissant(
             [meta1, meta2], ["fid-1", "fid-2"]
         )
@@ -310,7 +304,7 @@ class TestBuildCroissant:
         rows = [{"addr": {"city": "Berlin", "zip": "10115"}}]
         p = tmp_path / "nested.json"
         _write_json(p, rows)
-        meta = JSONHandler().extract_metadata(p)
+        meta = JSONHandler().extract(make_source(p))
         _, record_sets = JSONHandler().build_croissant([meta], ["fid"])
         rs = record_sets[0]
         addr_field = next(f for f in rs.fields if f.name == "addr")

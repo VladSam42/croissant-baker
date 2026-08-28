@@ -11,6 +11,7 @@ from croissant_baker.handlers.image_handler import (
     ImageHandler,
     collect_image_summary,
 )
+from croissant_baker.sources import make_source
 
 
 @pytest.fixture
@@ -68,7 +69,7 @@ def test_can_handle_accepts_supported_extensions_with_magic(
     extension's magic bytes are accepted."""
     p = tmp_path / filename
     p.write_bytes(_IMAGE_STUBS[p.suffix.lower()])
-    assert handler.can_handle(p) is True
+    assert handler.claims(make_source(p)) is True
 
 
 @pytest.mark.parametrize(
@@ -78,7 +79,7 @@ def test_can_handle_rejects_unsupported_extensions(
     handler: ImageHandler, name: str
 ) -> None:
     """Non-image extensions are rejected before any I/O — bare path is fine."""
-    assert handler.can_handle(Path(name)) is False
+    assert handler.claims(make_source(Path(name))) is False
 
 
 def test_can_handle_rejects_missing_file(handler: ImageHandler) -> None:
@@ -87,7 +88,7 @@ def test_can_handle_rejects_missing_file(handler: ImageHandler) -> None:
     Without a file we cannot honor the contract that extract_metadata won't
     crash, so can_handle must say no.
     """
-    assert handler.can_handle(Path("/nonexistent/photo.png")) is False
+    assert handler.claims(make_source(Path("/nonexistent/photo.png"))) is False
 
 
 def test_can_handle_rejects_wrong_magic(
@@ -103,9 +104,9 @@ def test_can_handle_rejects_wrong_magic(
     impostor = tmp_path / "fake.png"
     impostor.write_bytes(b"<!DOCTYPE html><html></html>")
     with caplog.at_level("WARNING", logger="croissant_baker.handlers.image_handler"):
-        assert handler.can_handle(impostor) is False
+        assert handler.claims(make_source(impostor)) is False
     assert any(
-        str(impostor) in r.message and "magic bytes" in r.message
+        impostor.name in r.message and "magic bytes" in r.message
         for r in caplog.records
     ), f"expected a WARNING naming {impostor} and 'magic bytes', got {caplog.records}"
 
@@ -116,7 +117,7 @@ def test_can_handle_missing_file_does_not_warn(
     """A missing file is silently rejected (no spurious warnings) since the
     caller, not the file, is at fault."""
     with caplog.at_level("WARNING", logger="croissant_baker.handlers.image_handler"):
-        assert handler.can_handle(Path("/nonexistent/photo.png")) is False
+        assert handler.claims(make_source(Path("/nonexistent/photo.png"))) is False
     assert caplog.records == []
 
 
@@ -126,7 +127,7 @@ def test_can_handle_accepts_real_image(handler: ImageHandler, tmp_path: Path) ->
 
     real_png = tmp_path / "real.png"
     Image.new("RGB", (4, 4), color="red").save(real_png)
-    assert handler.can_handle(real_png) is True
+    assert handler.claims(make_source(real_png)) is True
 
 
 def test_can_handle_accepts_bigtiff(handler: ImageHandler, tmp_path: Path) -> None:
@@ -143,9 +144,9 @@ def test_can_handle_accepts_bigtiff(handler: ImageHandler, tmp_path: Path) -> No
     )
     # Verify we wrote a real BigTIFF (version byte 0x2b, not 0x2a).
     assert bigtiff.read_bytes()[:4] in (b"II+\x00", b"MM\x00+")
-    assert handler.can_handle(bigtiff) is True
+    assert handler.claims(make_source(bigtiff)) is True
     # And extract_metadata must succeed — the contract.
-    meta = handler.extract_metadata(bigtiff)
+    meta = handler.extract(make_source(bigtiff))
     assert meta["image_properties"]["width"] == 4
     assert meta["image_properties"]["height"] == 4
 
@@ -172,7 +173,7 @@ def glaucoma_image_path() -> Path:
 
 
 def test_extract_metadata_jpg(handler: ImageHandler, glaucoma_image_path: Path) -> None:
-    meta = handler.extract_metadata(glaucoma_image_path)
+    meta = handler.extract(make_source(glaucoma_image_path))
 
     assert meta["file_name"] == "0_0.jpg"
     assert meta["encoding_format"] == "image/jpeg"
@@ -211,7 +212,7 @@ def satellite_tiff_path() -> Path:
 def test_extract_metadata_tiff(
     handler: ImageHandler, satellite_tiff_path: Path
 ) -> None:
-    meta = handler.extract_metadata(satellite_tiff_path)
+    meta = handler.extract(make_source(satellite_tiff_path))
 
     assert meta["file_name"] == "image_2016-01-03.tiff"
     assert meta["encoding_format"] == "image/tiff"
@@ -256,7 +257,7 @@ def test_extract_metadata_separate_planar_tiff(
         _force_tifffile_fallback,
     )
 
-    meta = handler.extract_metadata(separate_planar_tiff_path)
+    meta = handler.extract(make_source(separate_planar_tiff_path))
 
     assert meta["file_name"] == "separate_planar.tiff"
     assert meta["encoding_format"] == "image/tiff"
@@ -277,14 +278,14 @@ def test_extract_metadata_separate_planar_tiff(
 
 def test_extract_metadata_not_found(handler: ImageHandler) -> None:
     with pytest.raises(FileNotFoundError):
-        handler.extract_metadata(Path("/nonexistent/image.jpg"))
+        handler.extract(make_source(Path("/nonexistent/image.jpg")))
 
 
 def test_extract_metadata_corrupt_file(handler: ImageHandler, tmp_path: Path) -> None:
     bad_img = tmp_path / "corrupt.jpg"
     bad_img.write_bytes(b"not an image")
     with pytest.raises(ValueError, match="Failed to read image"):
-        handler.extract_metadata(bad_img)
+        handler.extract(make_source(bad_img))
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ from croissant_baker.handlers.dicom_handler import (
     collect_dicom_summary,
 )
 from croissant_baker.handlers.registry import find_handler, register_all_handlers
+from croissant_baker.sources import make_source
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +78,7 @@ def dicom_file(tmp_path: Path) -> Path:
     ],
 )
 def test_can_handle(handler: DICOMHandler, name: str, expected: bool) -> None:
-    assert handler.can_handle(Path(name)) == expected
+    assert handler.claims(make_source(Path(name))) == expected
 
 
 def test_can_handle_magic_bytes(handler: DICOMHandler, tmp_path: Path) -> None:
@@ -86,7 +87,7 @@ def test_can_handle_magic_bytes(handler: DICOMHandler, tmp_path: Path) -> None:
     _make_dicom(tmp_path / "tmp.dcm")
     src = tmp_path / "tmp.dcm"
     no_ext.write_bytes(src.read_bytes())
-    assert handler.can_handle(no_ext) is True
+    assert handler.claims(make_source(no_ext)) is True
 
 
 def test_cannot_handle_non_dicom_no_extension(
@@ -94,7 +95,7 @@ def test_cannot_handle_non_dicom_no_extension(
 ) -> None:
     f = tmp_path / "notdicom"
     f.write_bytes(b"\x00" * 132 + b"NOPE")
-    assert handler.can_handle(f) is False
+    assert handler.claims(make_source(f)) is False
 
 
 def test_cannot_handle_dcm_extension_without_preamble(
@@ -103,11 +104,11 @@ def test_cannot_handle_dcm_extension_without_preamble(
     """A .dcm file that lacks the DICM preamble (e.g. a DICOMDIR fragment) is rejected."""
     f = tmp_path / "fragment.dcm"
     f.write_bytes(b"\x00" * 132 + b"NOPE")
-    assert handler.can_handle(f) is False
+    assert handler.claims(make_source(f)) is False
 
 
 def test_extract_metadata(handler: DICOMHandler, dicom_file: Path) -> None:
-    meta = handler.extract_metadata(dicom_file)
+    meta = handler.extract(make_source(dicom_file))
 
     assert meta["file_name"] == "test.dcm"
     assert meta["encoding_format"] == "application/dicom"
@@ -127,7 +128,7 @@ def test_extract_metadata(handler: DICOMHandler, dicom_file: Path) -> None:
 
 def test_extract_metadata_mr(handler: DICOMHandler, tmp_path: Path) -> None:
     f = _make_dicom(tmp_path / "mr.dcm", modality="MR", rows=256, columns=256, bits=12)
-    meta = handler.extract_metadata(f)
+    meta = handler.extract(make_source(f))
     props = meta["dicom_properties"]
     assert props["modality"] == "MR"
     assert props["rows"] == 256
@@ -136,20 +137,20 @@ def test_extract_metadata_mr(handler: DICOMHandler, tmp_path: Path) -> None:
 
 def test_extract_metadata_multiframe(handler: DICOMHandler, tmp_path: Path) -> None:
     f = _make_dicom(tmp_path / "cine.dcm", num_frames=30)
-    meta = handler.extract_metadata(f)
+    meta = handler.extract(make_source(f))
     assert meta["dicom_properties"]["num_frames"] == 30
 
 
 def test_extract_metadata_file_not_found(handler: DICOMHandler) -> None:
     with pytest.raises(FileNotFoundError):
-        handler.extract_metadata(Path("/nonexistent/scan.dcm"))
+        handler.extract(make_source(Path("/nonexistent/scan.dcm")))
 
 
 def test_extract_metadata_corrupt_file(handler: DICOMHandler, tmp_path: Path) -> None:
     bad = tmp_path / "corrupt.dcm"
     bad.write_bytes(b"not a dicom file at all")
     with pytest.raises(ValueError, match="Failed to read DICOM file"):
-        handler.extract_metadata(bad)
+        handler.extract(make_source(bad))
 
 
 # ---------------------------------------------------------------------------

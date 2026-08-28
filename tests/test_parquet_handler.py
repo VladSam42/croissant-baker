@@ -8,6 +8,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from croissant_baker.handlers.parquet_handler import ParquetHandler
+from croissant_baker.sources import make_source
 
 
 @pytest.fixture
@@ -44,7 +45,7 @@ def test_can_handle_rejects_unsupported_extensions(
     handler: ParquetHandler, name: str
 ) -> None:
     """Non-.parquet extensions are rejected before any I/O."""
-    assert handler.can_handle(Path(name)) is False
+    assert handler.claims(make_source(Path(name))) is False
 
 
 _PARQUET_LOGGER = "croissant_baker.handlers.parquet_handler"
@@ -56,7 +57,7 @@ def test_can_handle_missing_file_does_not_warn(
     """A missing .parquet path is silently rejected (no spurious warning)
     since the caller, not the file, is at fault."""
     with caplog.at_level("WARNING", logger=_PARQUET_LOGGER):
-        assert handler.can_handle(Path("/nonexistent/data.parquet")) is False
+        assert handler.claims(make_source(Path("/nonexistent/data.parquet"))) is False
     assert caplog.records == []
 
 
@@ -73,9 +74,9 @@ def test_can_handle_rejects_wrong_magic(
     impostor = tmp_path / "fake.parquet"
     impostor.write_bytes(b"not a parquet file at all")
     with caplog.at_level("WARNING", logger=_PARQUET_LOGGER):
-        assert handler.can_handle(impostor) is False
+        assert handler.claims(make_source(impostor)) is False
     assert any(
-        str(impostor) in r.message and "PAR1 header" in r.message
+        impostor.name in r.message and "PAR1 header" in r.message
         for r in caplog.records
     ), f"expected a WARNING naming {impostor} and 'PAR1 header', got {caplog.records}"
 
@@ -88,9 +89,9 @@ def test_can_handle_rejects_truncated_parquet(
     truncated = tmp_path / "truncated.parquet"
     truncated.write_bytes(b"PAR1" + b"\x00" * 32)
     with caplog.at_level("WARNING", logger=_PARQUET_LOGGER):
-        assert handler.can_handle(truncated) is False
+        assert handler.claims(make_source(truncated)) is False
     assert any(
-        str(truncated) in r.message
+        truncated.name in r.message
         and ("footer" in r.message or "truncated" in r.message)
         for r in caplog.records
     ), (
@@ -106,9 +107,9 @@ def test_can_handle_rejects_too_small_parquet(
     tiny = tmp_path / "tiny.parquet"
     tiny.write_bytes(b"PAR")  # 3 bytes, well under the 8-byte minimum
     with caplog.at_level("WARNING", logger=_PARQUET_LOGGER):
-        assert handler.can_handle(tiny) is False
+        assert handler.claims(make_source(tiny)) is False
     assert any(
-        str(tiny) in r.message and "too small" in r.message for r in caplog.records
+        tiny.name in r.message and "too small" in r.message for r in caplog.records
     ), f"expected a WARNING naming {tiny} and 'too small', got {caplog.records}"
 
 
@@ -117,11 +118,11 @@ def test_can_handle_accepts_real_parquet(
 ) -> None:
     """A real Parquet file (PAR1 at start AND end) is accepted, including
     when the extension is uppercased."""
-    assert handler.can_handle(sample_parquet) is True
+    assert handler.claims(make_source(sample_parquet)) is True
 
     upper = sample_parquet.with_name("test.PARQUET")
     upper.write_bytes(sample_parquet.read_bytes())
-    assert handler.can_handle(upper) is True
+    assert handler.claims(make_source(upper)) is True
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +132,7 @@ def test_can_handle_accepts_real_parquet(
 
 def test_extract_metadata(handler: ParquetHandler, sample_parquet: Path) -> None:
     """Test Parquet metadata extraction returns correct structure."""
-    metadata = handler.extract_metadata(sample_parquet)
+    metadata = handler.extract(make_source(sample_parquet))
 
     assert metadata["file_name"] == "test.parquet"
     assert metadata["encoding_format"] == "application/vnd.apache.parquet"
@@ -171,7 +172,7 @@ def test_parquet_file_handle_closed(
     with patch(
         "croissant_baker.handlers.parquet_handler.ParquetFile", side_effect=_spy
     ):
-        handler.extract_metadata(sample_parquet)
+        handler.extract(make_source(sample_parquet))
 
     assert len(captured_handles) == 1, "ParquetFile should be opened exactly once"
     assert captured_handles[0].reader.closed, (
@@ -187,7 +188,7 @@ def test_parquet_file_handle_closed(
 def test_extract_metadata_not_found(handler: ParquetHandler) -> None:
     """Test that missing file raises FileNotFoundError."""
     with pytest.raises(FileNotFoundError):
-        handler.extract_metadata(Path("/nonexistent/data.parquet"))
+        handler.extract(make_source(Path("/nonexistent/data.parquet")))
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +251,7 @@ def test_parquet_array_shape_fixed_vs_variable(
     path = tmp_path / "vectors.parquet"
     pq.write_table(table, str(path))
 
-    meta = handler.extract_metadata(path)
+    meta = handler.extract(make_source(path))
     meta["relative_path"] = "vectors.parquet"
     _, record_sets = handler.build_croissant([meta], ["file_0"])
 

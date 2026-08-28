@@ -12,13 +12,23 @@ from typing import Dict, List, Optional
 
 import mlcroissant as mlc
 
-from croissant_baker.files import discover_files
-from croissant_baker.handlers.registry import find_handler, register_all_handlers
+from croissant_baker import compression
+from croissant_baker.handlers.registry import (
+    HandlerRegistry,
+    default_registry,
+    extract as extract_with,
+)
+from croissant_baker.handlers.utils import sanitize_id
+from croissant_baker.scan import (
+    Outcome,
+    Reason,
+    ScanEntry,
+    ScanReport,
+    resolve_duplicates,
+    scan_directory,
+)
 
 logger = logging.getLogger(__name__)
-
-# Register all handlers
-register_all_handlers()
 
 # conformsTo URIs declared on the Dataset. mlcroissant defaults conforms_to to
 # 1.0 even on 1.1.x — passing CROISSANT_CONFORMS_TO explicitly is the single
@@ -28,6 +38,143 @@ register_all_handlers()
 # https://docs.mlcommons.org/croissant/docs/croissant-spec-1.1.html
 CROISSANT_CONFORMS_TO = "http://mlcommons.org/croissant/1.1"
 RAI_CONFORMS_TO = "http://mlcommons.org/croissant/RAI/1.0"
+
+
+def _encoding_formats(format_media_type: str, relative_path: str) -> List[str]:
+    """The media types describing one file: its format, then its wrapper.
+
+    Croissant takes a list, so a gzipped CSV is
+    ``["text/csv", "application/gzip"]``. Handlers report only the format; the
+    wrapper is the pipeline's to know.
+    """
+    wrapper = compression.compression_for(Path(relative_path).name)
+    if wrapper is None:
+        return [format_media_type]
+    return [format_media_type, wrapper.media_type]
+
+
+#: Characters that make an ``includes`` entry a pattern rather than a filename.
+_GLOB_CHARS = ("*", "?", "[")
+
+
+def _wrappers_in(entries: list) -> List:
+    """The compressions among ``entries``, in registry order.
+
+    Called per handler batch, so a FileSet declares only the wrappers its own
+    files use. Registry order rather than set order keeps the output stable.
+    """
+    present = {
+        comp.suffix
+        for entry in entries
+        if (comp := compression.compression_for(entry.path.name))
+    }
+    return [c for c in compression.compressions() if c.suffix in present]
+
+
+def _resolve_file_sets(file_sets: list, stored_paths: dict, wrappers: list) -> list:
+    """Point each FileSet at the files as stored, and at the wrappers they use.
+
+    A handler names its files logically; only the generator knows what is on
+    disk. An exact name becomes the stored path or paths it stands for, and a
+    pattern gains one variant per compression present. Expanding an exact name
+    as if it were a pattern would append a second suffix.
+
+    Args:
+        file_sets: FileSets from one handler batch. Mutated in place.
+        stored_paths: Logical dataset-relative path to the stored paths sharing
+            it. A plain file and its wrapper share one logical key.
+        wrappers: Compressions present in this batch, in registry order.
+
+    Returns:
+        ``file_sets``, for chaining.
+    """
+    wrapper_types = [c.media_type for c in wrappers]
+    for file_set in file_sets:
+        formats = list(file_set.encoding_formats or [])
+        file_set.encoding_formats = formats + [
+            t for t in wrapper_types if t not in formats
+        ]
+
+        includes = getattr(file_set, "includes", None)
+        if not includes:
+            continue
+        resolved: List[str] = []
+        for pattern in includes:
+            if any(char in pattern for char in _GLOB_CHARS):
+                resolved.extend(compression.expand_globs([pattern], wrappers))
+            else:
+                # An exact name the scan did not find would be a phantom entry.
+                resolved.extend(stored_paths.get(pattern, ()))
+        file_set.includes = list(dict.fromkeys(resolved))
+    return file_sets
+
+
+def _handler_label(handler) -> str:
+    """A short, stable discriminator for a handler, for identifier collisions."""
+    name = type(handler).__name__
+    if name.endswith("Handler"):
+        name = name[: -len("Handler")]
+    return sanitize_id(name).lower() or "handler"
+
+
+def _rename_record_set(record_set, new_id: str) -> None:
+    """Point a record set and every field beneath it at a new identifier.
+
+    Field identifiers are ``{record_set}/{column}``, and sub-fields extend that
+    with another segment, so every identifier in the subtree carries the record
+    set's own as a prefix. Only the prefix moves; the column names, which are
+    what a reader matches on, are untouched.
+    """
+    old_prefix = f"{record_set.id}/"
+    record_set.id = new_id
+
+    def rewrite(fields) -> None:
+        for f in fields or []:
+            if f.id and f.id.startswith(old_prefix):
+                f.id = f"{new_id}/{f.id[len(old_prefix) :]}"
+            rewrite(getattr(f, "sub_fields", None))
+
+    rewrite(record_set.fields)
+
+
+def _disambiguate_record_sets(batches: list) -> list:
+    """Give same-stem record sets from different handlers distinct identifiers.
+
+    ``sample.csv`` and ``sample.tsv`` both shorten to the stem ``sample``, and
+    each handler names identifiers within its own batch, so the collision is
+    only visible once every batch has been built. Every member of a colliding
+    group is suffixed, so the outcome does not depend on which handler ran
+    first: ``sample_csv`` and ``sample_tsv``, never ``sample`` and
+    ``sample_tsv``.
+
+    Args:
+        batches: ``(handler, record_sets)`` pairs, one per handler that
+            contributed. Colliding record sets are renamed in place.
+
+    Returns:
+        Every record set, in batch order.
+    """
+    by_id: dict = defaultdict(list)
+    for handler, record_sets in batches:
+        for record_set in record_sets:
+            by_id[record_set.id].append((handler, record_set))
+
+    taken = {rs_id for rs_id, members in by_id.items() if len(members) == 1}
+    for rs_id, members in by_id.items():
+        if len(members) == 1:
+            continue
+        for handler, record_set in members:
+            candidate = f"{rs_id}_{_handler_label(handler)}"
+            # A file actually named sample_csv could already hold it.
+            if candidate in taken:
+                n = 2
+                while f"{candidate}__{n}" in taken:
+                    n += 1
+                candidate = f"{candidate}__{n}"
+            taken.add(candidate)
+            _rename_record_set(record_set, candidate)
+
+    return [rs for _, record_sets in batches for rs in record_sets]
 
 
 def serialize_datetime(obj):
@@ -176,6 +323,7 @@ class MetadataGenerator:
         includes: Optional[List[str]] = None,
         excludes: Optional[List[str]] = None,
         rai_fields: Optional[Dict[str, object]] = None,
+        handlers: Optional[HandlerRegistry] = None,
     ):
         """
         Initialize the metadata generator for a dataset.
@@ -221,6 +369,9 @@ class MetadataGenerator:
             excludes: Glob patterns to exclude. Applied after includes.
             rai_fields: Native mlcroissant RAI metadata fields, passed through
                 to ``mlc.Metadata`` unchanged.
+            handlers: Which handlers to consult, and in what order. Defaults to
+                the built-in registry. Supply one to bake with a narrower set,
+                or with a handler the baker does not ship.
 
         Raises:
             ValueError: If dataset_path is not a directory.
@@ -254,12 +405,27 @@ class MetadataGenerator:
         self.excludes = excludes
         self.rai_fields = rai_fields or {}
         self.max_workers = max_workers
+        self.handlers = handlers if handlers is not None else default_registry()
         # Generic options forwarded to every handler via **kwargs.
         # Handlers declare what they use; others ignore the rest.
         # To add a new handler-specific flag: add one key here — the call site never changes.
         self._handler_kwargs = {
             "count_rows": count_csv_rows,
         }
+        # One entry per file the last generate_metadata() call scanned, each
+        # carrying what became of it. Empty until then.
+        self._scan_entries: list[ScanEntry] = []
+
+    @property
+    def scan_report(self) -> ScanReport:
+        """Coverage of the last ``generate_metadata()`` call.
+
+        One entry per file the scan found, each carrying its outcome and, where
+        it was not described, the reason. Populated before the "No supported
+        files found in the dataset" guard fires, so a caller catching that
+        error can still ask why. Empty before the first call.
+        """
+        return ScanReport(self._scan_entries)
 
     def generate_metadata(self, progress_callback=None) -> dict:
         """Generate complete Croissant metadata for the dataset.
@@ -276,55 +442,59 @@ class MetadataGenerator:
                 (completed: int, total: int, file_path: str) -> None
                 invoked once per file as it finishes extraction.
         """
-        files = discover_files(
+        entries = scan_directory(
             str(self.dataset_path),
             include_patterns=self.includes,
             exclude_patterns=self.excludes,
         )
-        total_files = len(files)
+        self._scan_entries = entries
+        total_files = len(entries)
 
-        # Extract every file's metadata, possibly concurrently. results[i]
-        # corresponds to files[i], so downstream assembly stays deterministic
-        # no matter what order the threads finish in.
-        results: list = [None] * total_files
+        # Each worker touches only its own entry, and entries are read back in
+        # scan order below, so assembly stays deterministic whatever order the
+        # threads finish in.
         workers = self._resolve_worker_count(total_files)
         if workers == 1:
-            for i, file_path in enumerate(files):
-                results[i] = self._extract_file(file_path)
+            for i, entry in enumerate(entries):
+                self._extract_entry(entry)
                 if progress_callback:
-                    progress_callback(i + 1, total_files, str(file_path))
+                    progress_callback(i + 1, total_files, str(entry.path))
         else:
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                future_to_idx = {
-                    pool.submit(self._extract_file, fp): i for i, fp in enumerate(files)
+                future_to_entry = {
+                    pool.submit(self._extract_entry, e): e for e in entries
                 }
                 completed = 0
-                for future in as_completed(future_to_idx):
-                    idx = future_to_idx[future]
-                    results[idx] = future.result()
+                for future in as_completed(future_to_entry):
+                    future.result()
                     completed += 1
                     if progress_callback:
-                        progress_callback(completed, total_files, str(files[idx]))
+                        progress_callback(
+                            completed, total_files, str(future_to_entry[future].path)
+                        )
 
-        # Reassemble in discovery order. Handler identity is stored by reference
-        # (not id()), so there is no fragility if dicts are copied. Warnings and
-        # the skip-note are emitted here, in order, to match the serial path.
-        file_metadata: list[tuple] = []
+        # Before assembly, so a duplicate is linked rather than colliding on an
+        # @id; after extraction, so a file whose duplicate failed to parse is
+        # still described.
+        resolve_duplicates(entries, self.dataset_path)
+
+        # Read back in scan order.
+        ready: list[ScanEntry] = []
+        linked: list[ScanEntry] = []
         # Files that look like a recognised binary format by extension but were
         # rejected at handler-selection time (e.g. .dcm files without the DICM
         # preamble at offset 128) are valid skips, not errors — surfaced so the
         # user knows not all such files made it into the output.
         unmatched_by_ext: dict[str, int] = {}
-        for file_path, handler, meta, error in results:
-            if error is not None:
-                logger.warning("Failed to process %s: %s", file_path, error)
-                continue
-            if handler is None:
-                ext = (self.dataset_path / file_path).suffix.lower()
+        for entry in entries:
+            if entry.outcome is Outcome.UNCLAIMED:
+                ext = (self.dataset_path / entry.path).suffix.lower()
                 if ext in {".dcm", ".dicom"}:
                     unmatched_by_ext[ext] = unmatched_by_ext.get(ext, 0) + 1
-                continue
-            file_metadata.append((handler, meta))
+            elif entry.outcome is Outcome.READY:
+                ready.append(entry)
+            elif entry.outcome is Outcome.LINKED:
+                linked.append(entry)
 
         if unmatched_by_ext:
             total = sum(unmatched_by_ext.values())
@@ -334,12 +504,120 @@ class MetadataGenerator:
                 "standalone DICOM exports."
             )
 
-        if not file_metadata:
+        if not ready:
             raise ValueError("No supported files found in the dataset")
 
+        # Every file that will carry a distribution entry, in scan order, so
+        # identifiers do not depend on which handler owns which file.
+        with_objects = [
+            e for e in entries if e.outcome in (Outcome.READY, Outcome.LINKED)
+        ]
+
+        # Held, not committed: an entry whose handler fails to assemble leaves
+        # nothing behind, and that is not known until every batch has run.
+        staged: dict = {}
+        file_counter = 0
+        for entry in with_objects:
+            objects, file_counter = self._file_objects_for(entry, file_counter)
+            staged[entry] = objects
+
+        # Logical path -> the stored path or paths carrying it. A plain file
+        # and its wrapper share one logical key.
+        stored_paths: dict = defaultdict(list)
+        for entry in with_objects:
+            logical = str(entry.path.with_name(compression.logical_name(entry.name)))
+            stored_paths[logical].append(str(entry.path))
+
+        # A duplicate rides with the file it links to, so the FileSet covering
+        # that file also covers the form the duplicate arrived in.
+        dependants: dict = defaultdict(list)
+        for entry in linked:
+            if entry.duplicate_of is not None:
+                dependants[entry.duplicate_of].append(entry)
+
+        # TODO: future improvements per handler:
+        #   - references: detect foreign-key columns (e.g. subject_id) and emit
+        #     cr:references links between RecordSets — high-impact for EHR data.
+        #   - enumerations: for low-cardinality categorical columns, emit
+        #     sc:Enumeration RecordSets.
+        by_handler: dict = defaultdict(list)
+        for entry in ready:
+            by_handler[entry.handler].append(entry)
+
+        file_sets: list = []
+        batches: list[tuple] = []
+        for handler, batch in by_handler.items():
+            pairs = [(staged[e][0].id, e.meta) for e in batch]
+            try:
+                handler_file_sets, record_sets = handler.build_croissant(
+                    [m for _, m in pairs],
+                    [fid for fid, _ in pairs],
+                )
+            except Exception as e:  # noqa: BLE001 — one batch, not the bake
+                logger.warning(
+                    "%s.build_croissant failed: %s", type(handler).__name__, e
+                )
+                for entry in batch:
+                    entry.failed(Reason.BUILD_FAILED, e)
+                continue
+            covered = [e for entry in batch for e in (entry, *dependants[entry])]
+            file_sets.extend(
+                _resolve_file_sets(
+                    handler_file_sets, stored_paths, _wrappers_in(covered)
+                )
+            )
+            batches.append((handler, record_sets))
+            for entry in batch:
+                entry.describe()
+
+        # A duplicate stands on its primary's description. Where there is none,
+        # saying so beats a link to a file nothing describes.
+        for entry in linked:
+            primary = entry.duplicate_of
+            if primary is not None and primary.outcome is Outcome.DESCRIBED:
+                continue
+            staged.pop(entry, None)
+            target = primary.path if primary is not None else "another file"
+            entry.failed(
+                Reason.BUILD_FAILED,
+                ValueError(f"duplicates {target}, which was not described"),
+            )
+
+        surviving = [e for e in with_objects if e.outcome is not Outcome.FAILED]
+        if not any(e.outcome is Outcome.DESCRIBED for e in surviving):
+            raise ValueError("No supported files found in the dataset")
+
+        # distributions holds both FileObjects and FileSets — the full contents
+        # of the Croissant `distribution` array per the spec.
+        distributions = []
+        by_stored_path: dict = {}
+        for entry in surviving:
+            objects = staged.get(entry)
+            if objects is None:
+                continue
+            distributions.extend(objects)
+            by_stored_path[str(entry.path)] = objects[0].id
+
+        # A duplicate's sameAs target may not have been built yet: discovery
+        # order is the filesystem's. Resolve once every id is assigned.
+        for entry in surviving:
+            if entry.outcome is Outcome.LINKED and entry in staged:
+                staged[entry][0].same_as = [
+                    by_stored_path[str(entry.duplicate_of.path)]
+                ]
+
+        distributions.extend(file_sets)
+
+        # A stem shared across two formats only collides here, where every
+        # batch is visible at once.
+        record_sets = _disambiguate_record_sets(batches)
+
+        described_metas = [
+            (e.handler, e.meta) for e in entries if e.outcome is Outcome.DESCRIBED
+        ]
         metadata = mlc.Metadata(
             name=self.name or self.dataset_path.name,
-            description=self._build_description(file_metadata),
+            description=self._build_description(described_metas),
             url=self.url,
             license=self._resolve_license(),
             creators=self._build_creators(),
@@ -356,70 +634,6 @@ class MetadataGenerator:
             sd_licence=self.sd_license,
             **self.rai_fields,
         )
-
-        # distributions holds both FileObjects and FileSets — the full contents
-        # of the Croissant `distribution` array per the spec.
-        distributions = []
-        record_sets = []
-        # Use a counter (not enumerate) for unique FileObject IDs: some formats
-        # (e.g. WFDB) create multiple FileObjects per meta via related_files,
-        # so enumerate would produce ID collisions.
-        file_counter = 0
-        _batch_handlers: dict = defaultdict(list)
-
-        for handler, file_meta in file_metadata:
-            file_id = f"file_{file_counter}"
-            file_counter += 1
-
-            distributions.append(
-                mlc.FileObject(
-                    id=file_id,
-                    name=file_meta["file_name"],
-                    content_url=file_meta["relative_path"],
-                    encoding_formats=[file_meta["encoding_format"]],
-                    content_size=str(file_meta["file_size"]),
-                    sha256=file_meta["sha256"],
-                )
-            )
-
-            # Multi-file records (e.g. WFDB: .hea + .dat + .atr): the generator
-            # owns FileObject creation for every physical file. RecordSet
-            # construction is delegated to the handler via build_croissant.
-            if "related_files" in file_meta:
-                for related in file_meta["related_files"]:
-                    related_id = f"file_{file_counter}"
-                    file_counter += 1
-                    rel_path = Path(related["path"])
-                    distributions.append(
-                        mlc.FileObject(
-                            id=related_id,
-                            name=related["name"],
-                            content_url=str(rel_path.relative_to(self.dataset_path)),
-                            encoding_formats=[related["encoding"]],
-                            content_size=str(related["size"]),
-                            sha256=related["sha256"],
-                        )
-                    )
-
-            _batch_handlers[handler].append((file_id, file_meta))
-
-        # Each handler builds its FileSets + RecordSets and returns them.
-        # Handlers never return FileObjects — those are owned by the generator.
-        # TODO: future improvements per handler:
-        #   - references: detect foreign-key columns (e.g. subject_id) and emit
-        #     cr:references links between RecordSets — high-impact for EHR data.
-        #   - enumerations: for low-cardinality categorical columns, emit
-        #     sc:Enumeration RecordSets.
-        for _h, pairs in _batch_handlers.items():
-            try:
-                filesets, rs = _h.build_croissant(
-                    [m for _, m in pairs],
-                    [fid for fid, _ in pairs],
-                )
-                distributions.extend(filesets)
-                record_sets.extend(rs)
-            except Exception as e:
-                logger.warning("%s.build_croissant failed: %s", type(_h).__name__, e)
 
         _assert_unique_node_ids(distributions, record_sets)
 
@@ -467,26 +681,73 @@ class MetadataGenerator:
         cpu = os.cpu_count() or 1
         return min(8, n_files, cpu * 2)
 
-    def _extract_file(self, file_path: Path) -> tuple:
-        """Select a handler and extract one file's metadata.
+    def _extract_entry(self, entry: ScanEntry) -> None:
+        """Select a handler for one scan entry and resolve its outcome in place.
 
-        Reads only the file at ``file_path`` and returns plain data, holding no
-        generator state, so it is safe to call concurrently across files. No
-        mlcroissant objects are built here — that happens single-threaded during
-        assembly. Returns ``(file_path, handler, meta, error)``: for a handled
-        file ``handler``/``meta`` are set; for an extraction failure ``error`` is
-        set; for an unmatched file all three are None.
+        Touches only that entry, so it is safe to call concurrently. Never
+        raises: selection is inside the guard as well as extraction, because a
+        handler sniffing magic bytes has to decompress to do it, so a corrupt
+        wrapper raises while the registry is still deciding who owns the file.
         """
-        full_path = self.dataset_path / file_path
-        handler = find_handler(full_path)
-        if handler is None:
-            return (file_path, None, None, None)
+        full_path = self.dataset_path / entry.path
         try:
-            meta = handler.extract_metadata(full_path, **self._handler_kwargs)
-            meta["relative_path"] = str(file_path)
-            return (file_path, handler, meta, None)
-        except Exception as e:  # noqa: BLE001 — re-surfaced as a per-file warning
-            return (file_path, None, None, e)
+            selection = self.handlers.select(full_path, entry.path)
+        except Exception as e:  # noqa: BLE001 — one file, not the bake
+            entry.failed(Reason.CLAIM_FAILED, e)
+            return
+
+        if selection.handler is None:
+            entry.unclaimed(selection.reason or Reason.NO_HANDLER, selection.refusal)
+            return
+
+        handler, source = selection.handler, selection.source
+        try:
+            meta = extract_with(handler, source, full_path, **self._handler_kwargs)
+            # The logical path derives identifiers; the stored name is for
+            # prose, which has to name a file the reader can find on disk.
+            meta["relative_path"] = str(source.relative_path)
+            meta["stored_name"] = entry.path.name
+            entry.ready(handler, meta)
+        except Exception as e:  # noqa: BLE001 — recorded, then reported
+            entry.failed(Reason.EXTRACT_FAILED, e)
+
+    def _file_objects_for(self, entry: ScanEntry, counter: int) -> tuple[list, int]:
+        """Build the distribution entries for one file, and the next free id.
+
+        A list, because a multi-file record produces several: WFDB reads a
+        header together with its sibling ``.dat`` and ``.atr``. Everything here
+        addresses the file *as stored*, wrapper included.
+        """
+        meta = entry.meta
+        objects = [
+            mlc.FileObject(
+                id=f"file_{counter}",
+                name=entry.path.name,
+                content_url=str(entry.path),
+                encoding_formats=_encoding_formats(
+                    meta["encoding_format"], entry.path.name
+                ),
+                content_size=str(meta["file_size"]),
+                sha256=meta["sha256"],
+            )
+        ]
+        counter += 1
+
+        for related in meta.get("related_files", []):
+            rel_path = Path(related["path"])
+            objects.append(
+                mlc.FileObject(
+                    id=f"file_{counter}",
+                    name=related["name"],
+                    content_url=str(rel_path.relative_to(self.dataset_path)),
+                    encoding_formats=[related["encoding"]],
+                    content_size=str(related["size"]),
+                    sha256=related["sha256"],
+                )
+            )
+            counter += 1
+
+        return objects, counter
 
     def _build_description(self, file_metadata: list) -> str:
         if self.description:
