@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -297,9 +298,10 @@ def _apply_field_mappings(
             )
 
 
-def _warn_undescribed(entry: ScanEntry) -> None:
-    """Report a file as it is passed over, not only in the closing summary."""
-    logger.warning("%s: %s", entry.path, entry.detail)
+# Per-file warnings are how a long run says what it is passing over. Past this
+# many the run is not reporting an exception any more, and the coverage summary
+# — which is a fixed size — already carries the counts.
+MAX_UNDESCRIBED_WARNINGS = 50
 
 
 class MetadataGenerator:
@@ -431,6 +433,8 @@ class MetadataGenerator:
         # One entry per file the last generate_metadata() call scanned, each
         # carrying what became of it. Empty until then.
         self._scan_entries: list[ScanEntry] = []
+        self._warned = 0
+        self._warn_lock = threading.Lock()
 
     @property
     def scan_report(self) -> ScanReport:
@@ -449,9 +453,10 @@ class MetadataGenerator:
         Per-file metadata extraction (handler selection, whole-file SHA-256,
         header/schema reads) is I/O-bound and independent across files, so it
         runs on a thread pool sized by ``max_workers``. Results are reassembled
-        in discovery order before any FileObject @id is assigned, so the output
-        — including the order of warnings — is identical regardless of worker
-        count.
+        in discovery order before any FileObject @id is assigned, so the
+        document is identical regardless of worker count. Per-file warnings are
+        the exception: they are emitted as each file is passed over, so they
+        arrive in completion order and reach a long run while it is still going.
 
         Args:
             progress_callback: Optional callback with signature
@@ -464,6 +469,7 @@ class MetadataGenerator:
             exclude_patterns=self.excludes,
         )
         self._scan_entries = entries
+        self._warned = 0
         total_files = len(entries)
 
         # Each worker touches only its own entry, and entries are read back in
@@ -569,26 +575,28 @@ class MetadataGenerator:
                     [m for _, m in pairs],
                     [fid for fid, _ in pairs],
                 )
+                # A handler may decline individual files rather than the batch;
+                # older ones return two values and decline nothing. Unpacked
+                # under the guard, so a malformed return costs this batch only.
+                handler_file_sets, record_sets, declined = (
+                    built if len(built) == 3 else (*built, ())
+                )
             except Exception as e:  # noqa: BLE001 — one batch, not the bake
                 logger.warning(
                     "%s.build_croissant failed: %s", type(handler).__name__, e
                 )
                 for entry in batch:
                     entry.failed(Reason.BUILD_FAILED, e)
+                    self._warn_undescribed(entry)
                 continue
 
-            # A handler may decline individual files rather than the batch;
-            # older ones return two values and decline nothing.
-            handler_file_sets, record_sets, declined = (
-                built if len(built) == 3 else (*built, ())
-            )
             rejected = set()
             for index, reason, detail in declined:
                 entry = batch[index]
                 rejected.add(entry)
                 staged.pop(entry, None)
                 entry.failed(reason, ValueError(detail))
-                _warn_undescribed(entry)
+                self._warn_undescribed(entry)
 
             described = [e for e in batch if e not in rejected]
             covered = [e for entry in described for e in (entry, *dependants[entry])]
@@ -613,6 +621,7 @@ class MetadataGenerator:
                 Reason.BUILD_FAILED,
                 ValueError(f"duplicates {target}, which was not described"),
             )
+            self._warn_undescribed(entry)
 
         surviving = [e for e in with_objects if e.outcome is not Outcome.FAILED]
         if not any(e.outcome is Outcome.DESCRIBED for e in surviving):
@@ -712,6 +721,26 @@ class MetadataGenerator:
         cpu = os.cpu_count() or 1
         return min(8, n_files, cpu * 2)
 
+    def _warn_undescribed(self, entry: ScanEntry) -> None:
+        """Report a file as it is passed over, not only in the closing summary.
+
+        Capped, because the summary already counts them and a directory of ten
+        thousand unknown files would otherwise bury everything else. Extraction
+        runs on a pool, so these arrive in completion order.
+        """
+        with self._warn_lock:
+            self._warned += 1
+            seen = self._warned
+        if seen < MAX_UNDESCRIBED_WARNINGS:
+            logger.warning("%s: %s", entry.path, entry.detail)
+        elif seen == MAX_UNDESCRIBED_WARNINGS:
+            logger.warning(
+                "%s: %s (further per-file warnings suppressed; see the coverage "
+                "summary, --verbose or --report)",
+                entry.path,
+                entry.detail,
+            )
+
     def _extract_entry(self, entry: ScanEntry) -> None:
         """Select a handler for one scan entry and resolve its outcome in place.
 
@@ -725,12 +754,12 @@ class MetadataGenerator:
             selection = self.handlers.select(full_path, entry.path)
         except Exception as e:  # noqa: BLE001 — one file, not the bake
             entry.failed(Reason.CLAIM_FAILED, e)
-            _warn_undescribed(entry)
+            self._warn_undescribed(entry)
             return
 
         if selection.handler is None:
             entry.unclaimed(selection.reason or Reason.NO_HANDLER, selection.refusal)
-            _warn_undescribed(entry)
+            self._warn_undescribed(entry)
             return
 
         handler, source = selection.handler, selection.source
@@ -743,7 +772,7 @@ class MetadataGenerator:
             entry.ready(handler, meta)
         except Exception as e:  # noqa: BLE001 — recorded, then reported
             entry.failed(Reason.EXTRACT_FAILED, e)
-            _warn_undescribed(entry)
+            self._warn_undescribed(entry)
 
     def _file_objects_for(self, entry: ScanEntry, counter: int) -> tuple[list, int]:
         """Build the distribution entries for one file, and the next free id.

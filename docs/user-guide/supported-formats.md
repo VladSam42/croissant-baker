@@ -2,7 +2,7 @@
 
 croissant-baker detects file types automatically. Handlers are checked in the order listed below — the first match wins.
 
-Nothing is skipped in silence. A file no handler describes is counted in the run's coverage summary with the reason it was not, named individually under `--verbose`, and recorded in the machine-readable `--report` file:
+Nothing is skipped in silence. Each file that goes undescribed is named on the log as the run passes over it — so a long bake says so while it is still running — and counted in the closing coverage summary with the reason. Per-file warnings stop after the first 50, since past that the summary is the better account. The full list is under `--verbose`, or in the machine-readable `--report` file:
 
 ```text
 Scanned 8 file(s): 5 described, 3 not described.
@@ -33,7 +33,8 @@ fixed vocabularies, so a tool can branch on them without parsing English:
 `outcome` is one of `described`, `linked`, `unclaimed`, `failed`, or
 `would_process` (`--dry-run` only). `reason` is one of `no_handler`, `archive`,
 `unsupported_input`, `claim_failed`, `extract_failed`, `build_failed`,
-`duplicate_by_name`, or `probable_duplicate`, and is absent on `described`.
+`partition_schema_conflict`, `duplicate_by_name`, or `probable_duplicate`, and
+is absent on `described`.
 
 ## File types
 
@@ -110,7 +111,18 @@ Schema is inferred from a sample of records. FHIR `.json` files are excluded —
 
 ## Parquet
 
-Schema is read from Parquet metadata only — the file data is never loaded. Partitioned datasets (a directory containing two or more `.parquet` files) are grouped into a single logical `cr:FileSet` and `cr:RecordSet`.
+Schema is read from Parquet metadata only — the file data is never loaded.
+
+Spark and Arrow write one table as a directory of `part-*.parquet`, while a vendor export directory holds several unrelated tables. Directory membership cannot tell those apart, so two files are shards of one logical table — one `cr:FileSet` and one `cr:RecordSet` — only when both hold:
+
+| Evidence | What counts |
+|----------|-------------|
+| A shard-shaped name | The names match once digit runs are masked, and at least one of those runs is a name component of its own: the whole stem (`0.parquet`) or introduced by `-`, `_` or `.` (`part-00000.parquet`). Digits fused to letters are part of a word, so `assay1.parquet` and `assay2.parquet` stay two tables |
+| An identical Arrow schema | Compared as Arrow types, not as Croissant types, which collapse timestamp units, nullability, decimal precision and nested structure |
+
+Anything else is described on its own, as CSV and JSON files are. Files at the dataset root never pair.
+
+Where files agree on the name but not the schema, that is drift inside one table: the majority schema is described and the rest are reported with reason `partition_schema_conflict` rather than folded in. The `cr:FileSet` then lists its shards individually — a directory-wide glob would re-admit exactly the files that were kept out.
 
 ## WFDB
 

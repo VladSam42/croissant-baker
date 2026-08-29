@@ -6,12 +6,18 @@ from pathlib import Path
 import pytest
 
 from croissant_baker.handlers.csv_handler import CSVHandler
-from croissant_baker.metadata_generator import MetadataGenerator
+from croissant_baker.handlers.registry import HandlerRegistry
+from croissant_baker.handlers.tsv_handler import TSVHandler
+from croissant_baker.metadata_generator import (
+    MAX_UNDESCRIBED_WARNINGS,
+    MetadataGenerator,
+)
 from croissant_baker.scan import Outcome, Reason, ScanEntry, ScanReport
 
 from tests.helpers import bake_with, bake_with_report, file_objects, write_wrapped
 
 CSV = b"id,name\n1,Ada\n2,Grace\n"
+
 HEADER = b"record 1 1 10\nrecord.dat 16 200\n"
 
 
@@ -244,3 +250,57 @@ def test_a_file_that_fails_to_parse_names_itself(tmp_path, caplog):
 
     messages = [r.getMessage() for r in caplog.records]
     assert any("broken.csv" in m and "CSV parse error" in m for m in messages), messages
+
+
+def test_per_file_warnings_stay_bounded(tmp_path, caplog):
+    """The summary already counts these; a big directory must not bury the run."""
+    (tmp_path / "data.csv").write_text("a,b\n1,2\n")
+    for i in range(MAX_UNDESCRIBED_WARNINGS + 20):
+        (tmp_path / f"notes{i}.md").write_text("free text")
+
+    with caplog.at_level(logging.WARNING, logger="croissant_baker"):
+        MetadataGenerator(dataset_path=str(tmp_path)).generate_metadata()
+
+    named = [r for r in caplog.records if ".md" in r.getMessage()]
+    assert len(named) == MAX_UNDESCRIBED_WARNINGS
+    assert "further per-file warnings suppressed" in named[-1].getMessage()
+
+
+def test_a_batch_that_fails_to_build_names_its_files(tmp_path, caplog):
+    """A handler failing as a whole must still say which files it took down."""
+
+    class Exploding(CSVHandler):
+        def build_croissant(self, file_metas, file_ids):
+            raise RuntimeError("boom")
+
+    (tmp_path / "one.csv").write_text("a,b\n1,2\n")
+    (tmp_path / "two.tsv").write_text("a\tb\n1\t2\n")
+
+    with caplog.at_level(logging.WARNING, logger="croissant_baker"):
+        MetadataGenerator(
+            dataset_path=str(tmp_path),
+            handlers=HandlerRegistry([Exploding(), TSVHandler()]),
+        ).generate_metadata()
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("one.csv" in m and "boom" in m for m in messages), messages
+
+
+def test_a_malformed_handler_return_costs_only_its_batch(tmp_path, caplog):
+    """Unpacking under the guard: the other handlers' files are still described."""
+
+    class Wrong(CSVHandler):
+        def build_croissant(self, file_metas, file_ids):
+            return "not", "a", "valid", "return"
+
+    (tmp_path / "one.csv").write_text("a,b\n1,2\n")
+    (tmp_path / "two.tsv").write_text("a\tb\n1\t2\n")
+
+    with caplog.at_level(logging.WARNING, logger="croissant_baker"):
+        result = MetadataGenerator(
+            dataset_path=str(tmp_path),
+            handlers=HandlerRegistry([Wrong(), TSVHandler()]),
+        ).generate_metadata()
+
+    assert [rs["name"] for rs in result["recordSet"]] == ["two"]
+    assert any("one.csv" in r.getMessage() for r in caplog.records)

@@ -360,3 +360,93 @@ def test_parquet_array_shape_fixed_vs_variable(
     assert fields["embedding"].array_shape == "384"
     assert fields["tags"].is_array is True
     assert fields["tags"].array_shape == "-1"
+
+
+def test_a_declined_shard_is_not_left_inside_the_fileset(
+    handler: ParquetHandler,
+) -> None:
+    """A glob over the directory would re-admit the shard the schema kept out."""
+    metas = [
+        _pq_meta("part-00000.parquet", "events/part-00000.parquet", _BOUNDARIES),
+        _pq_meta("part-00001.parquet", "events/part-00001.parquet", _BOUNDARIES),
+        _pq_meta("part-00002.parquet", "events/part-00002.parquet", _CELLS),
+    ]
+    filesets, _, conflicts = handler.build_croissant(metas, ["f0", "f1", "f2"])
+
+    assert len(conflicts) == 1
+    assert filesets[0].includes == [
+        "events/part-00000.parquet",
+        "events/part-00001.parquet",
+    ]
+
+
+def test_shards_are_grouped_on_the_arrow_schema_not_the_croissant_types(
+    handler: ParquetHandler,
+) -> None:
+    """Two timestamp units are one Croissant type and two different tables."""
+    metas = []
+    for i, unit in enumerate(("s", "ns")):
+        meta = _pq_meta(f"part-0000{i}.parquet", f"events/part-0000{i}.parquet")
+        meta["column_types"] = {"t": "sc:DateTime"}
+        meta["arrow_schema"] = pa.schema([pa.field("t", pa.timestamp(unit))])
+        metas.append(meta)
+
+    filesets, record_sets, conflicts = handler.build_croissant(metas, ["f0", "f1"])
+
+    assert filesets == []
+    assert conflicts == []
+    assert len({r.id for r in record_sets}) == 2
+
+
+def test_root_level_files_are_never_declined(handler: ParquetHandler) -> None:
+    """Root files never pair, so a schema difference between them settles nothing."""
+    metas = [
+        _pq_meta("part-00000.parquet", "part-00000.parquet", _BOUNDARIES),
+        _pq_meta("part-00001.parquet", "part-00001.parquet", _CELLS),
+    ]
+    filesets, record_sets, conflicts = handler.build_croissant(metas, ["f0", "f1"])
+
+    assert filesets == []
+    assert conflicts == []
+    assert sorted(r.name for r in record_sets) == ["part-00000", "part-00001"]
+
+
+def test_two_templates_reducing_to_one_stem_get_distinct_ids(
+    handler: ParquetHandler,
+) -> None:
+    """``part-000`` and ``part_000`` share a directory, a stem, and every parent."""
+    metas = [
+        _pq_meta("part-000.parquet", "d/part-000.parquet", _BOUNDARIES),
+        _pq_meta("part-001.parquet", "d/part-001.parquet", _BOUNDARIES),
+        _pq_meta("part_000.parquet", "d/part_000.parquet", _CELLS),
+        _pq_meta("part_001.parquet", "d/part_001.parquet", _CELLS),
+    ]
+    filesets, record_sets, _ = handler.build_croissant(metas, ["f0", "f1", "f2", "f3"])
+
+    assert len({f.id for f in filesets}) == 2
+    assert len({r.id for r in record_sets}) == 2
+
+
+def test_a_number_inside_a_word_is_not_a_shard_index(handler: ParquetHandler) -> None:
+    """``assay1`` and ``assay2`` are two tables; only a separated run is an index."""
+    metas = [
+        _pq_meta("assay1.parquet", "d/assay1.parquet", _BOUNDARIES),
+        _pq_meta("assay2.parquet", "d/assay2.parquet", _BOUNDARIES),
+    ]
+    filesets, record_sets, conflicts = handler.build_croissant(metas, ["f0", "f1"])
+
+    assert filesets == []
+    assert conflicts == []
+    assert sorted(r.name for r in record_sets) == ["assay1", "assay2"]
+
+
+def test_differing_years_are_not_merged_or_declined(handler: ParquetHandler) -> None:
+    """``report2024`` and ``report2025`` disagree on schema and both survive."""
+    metas = [
+        _pq_meta("report2024.parquet", "d/report2024.parquet", _BOUNDARIES),
+        _pq_meta("report2025.parquet", "d/report2025.parquet", _CELLS),
+    ]
+    _, record_sets, conflicts = handler.build_croissant(metas, ["f0", "f1"])
+
+    assert conflicts == []
+    assert sorted(r.name for r in record_sets) == ["report2024", "report2025"]

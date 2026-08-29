@@ -4,7 +4,7 @@ import logging
 import re
 import warnings
 from pathlib import Path
-from typing import Dict, Union
+from typing import Dict, Optional, Union
 
 
 import mlcroissant as mlc
@@ -88,8 +88,9 @@ def _disambiguate_ids(items: list) -> list:
     minimum number of trailing parent components is prepended (joined
     with ``__``) until every member of the colliding group is unique.
 
-    Filesystem paths are unique by construction, so the loop is
-    guaranteed to converge for items derived from real file metadata.
+    Parents cannot separate stems that collide under one parent — two
+    groupings of one directory, say — so a numeric suffix settles whatever
+    survives. Uniqueness is the contract; callers assemble @ids from it.
     """
     from collections import defaultdict
 
@@ -120,14 +121,21 @@ def _disambiguate_ids(items: list) -> list:
                 chosen = candidates
                 break
         if not chosen:
-            # Fallback: every available parent component included. Filesystem
-            # paths are unique, so this branch should not fire on real inputs;
-            # kept as a safety net for synthetic / pathological cases.
             chosen = {
                 i: sanitize_id("__".join([*parents_per[i], stem])) for i in indices
             }
         for i, value in chosen.items():
             out[i] = value
+
+    used: set = set()
+    for i, value in enumerate(out):
+        if value in used:
+            n = 1
+            while f"{value}__{n}" in used:
+                n += 1
+            value = f"{value}__{n}"
+        used.add(value)
+        out[i] = value
     return out
 
 
@@ -158,29 +166,22 @@ def make_record_set_ids(file_metas: list) -> list:
 DIGIT_MASK = "<N>"
 _DIGIT_RUN = re.compile(r"\d+")
 
+# A shard index stands on its own: it is either the whole stem or introduced by
+# a separator. Digits fused to letters belong to a word instead — ``assay1`` and
+# ``assay2`` are two tables, where ``part-00001`` is one table's shard.
+_SHARD_INDEX = re.compile(r"(?:^|(?<=[-_.]))\d+")
 
-def partition_template(file_name: str) -> str:
-    """The basename with digit runs masked, so shards of one table share a key.
 
-    Only a numeric index varies between shards; Spark's job uuid is constant
-    across the files one write produces.
+def shard_template(file_name: str) -> Optional[str]:
+    """The name with digit runs masked, or None if it carries no shard index.
+
+    Shards of one table differ only in that index, so the masked name is the
+    key they share. Every digit run is masked, not just the index: Spark writes
+    a job uuid into the name that is constant across one write anyway.
     """
+    if not _SHARD_INDEX.search(file_name):
+        return None
     return _DIGIT_RUN.sub(DIGIT_MASK, file_name)
-
-
-def make_partition_record_set_ids(dir_paths: list) -> list:
-    """Return a unique RecordSet @id for each partitioned-table directory.
-
-    Same algorithm as ``make_record_set_ids``, but the source of the
-    identifier is the trailing directory name rather than a file
-    basename. Used by the Parquet handler when grouping shards into a
-    single logical table.
-    """
-    items = [
-        (sanitize_id(Path(dir_path).name), list(Path(dir_path).parts[:-1]))
-        for dir_path in dir_paths
-    ]
-    return _disambiguate_ids(items)
 
 
 def make_field_id(record_set_id: str, column_name: str, used_field_ids: set) -> str:

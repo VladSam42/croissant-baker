@@ -125,7 +125,7 @@ class FileTypeHandler(ABC):
         self,
         file_metas: list[dict],
         file_ids: list[str],
-    ) -> tuple[list, list]:
+    ) -> tuple:
         """Build Croissant FileSets and RecordSets for every file this handler read.
 
         Called once per handler, after the FileObject loop.
@@ -137,6 +137,12 @@ class FileTypeHandler(ABC):
 
         Returns:
             ``(file_sets, record_sets)``. FileObjects are the generator's.
+
+            A handler that describes some of its batch but not all returns a
+            third element, ``declined``: one ``(index, Reason, detail)`` per
+            file it passed over, indexed into ``file_metas``. Those files are
+            reported as failures and the rest of the batch is still described.
+            Raising instead fails the whole batch.
         """
         pass
 

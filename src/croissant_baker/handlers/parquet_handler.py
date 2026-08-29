@@ -3,7 +3,7 @@
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 from pathlib import Path
 
 import mlcroissant as mlc
@@ -20,8 +20,8 @@ from croissant_baker.handlers.utils import (
     infer_column_types_from_arrow_schema,
     make_field_id,
     DIGIT_MASK,
-    partition_template,
     sanitize_id,
+    shard_template,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,14 +106,25 @@ class _Table:
     disambig_parents: list
     is_partitioned: bool
     alone_in_dir: bool
+    covers_dir: bool
 
     @property
     def first_meta(self) -> dict:
         return self.files[0].meta
 
 
-def _schema_of(meta: dict) -> tuple:
-    return tuple(meta["column_types"].items())
+def _schema_of(meta: dict) -> str:
+    """The key two files must share to be shards of one table.
+
+    The Arrow schema, not ``column_types``: Croissant types collapse timestamp
+    units, nullability, decimal precision, nested structure and fixed-list
+    dimensions, and the emitted fields come from one shard's Arrow schema, so a
+    difference there misdescribes every other shard.
+    """
+    schema = meta.get("arrow_schema")
+    if schema is None:
+        return str(list(meta["column_types"].items()))
+    return str(schema.remove_metadata())
 
 
 def _group_tables(file_metas: list, file_ids: list) -> tuple:
@@ -121,8 +132,8 @@ def _group_tables(file_metas: list, file_ids: list) -> tuple:
 
     Spark and Arrow write one table as a directory of ``part-*.parquet``; a
     vendor output directory holds several unrelated ones. Directory membership
-    cannot tell those apart, so files group on evidence instead: the same
-    schema, and the same name once digit runs are masked.
+    cannot tell those apart, so files group on evidence instead: a shard-shaped
+    name that matches once its index is masked, and an identical Arrow schema.
     """
     by_dir: dict = defaultdict(list)
     for index, (file_id, meta) in enumerate(zip(file_ids, file_metas)):
@@ -141,9 +152,21 @@ def _group_tables(file_metas: list, file_ids: list) -> tuple:
 
 def _tables_in_dir(dir_path: str, files: list) -> tuple:
     """The tables one directory holds, and the shards it had to decline."""
+    ordered = sorted(files, key=lambda f: str(f.meta["relative_path"]))
+
+    # The dataset root is not a table, so its own files never pair — and with
+    # no merge to protect, a schema difference between them decides nothing.
+    if dir_path == ".":
+        return [_make_table(dir_path, [f], None, False, False) for f in ordered], []
+
     by_template: dict = defaultdict(list)
-    for file in sorted(files, key=lambda f: str(f.meta["relative_path"])):
-        by_template[partition_template(file.meta["file_name"])].append(file)
+    loners: list = []
+    for file in ordered:
+        template = shard_template(file.meta["file_name"])
+        if template is None:
+            loners.append(file)
+        else:
+            by_template[template].append(file)
 
     groups: list = []
     conflicts: list = []
@@ -152,26 +175,35 @@ def _tables_in_dir(dir_path: str, files: list) -> tuple:
         for file in by_template[template]:
             by_schema[_schema_of(file.meta)].append(file)
 
-        if len(by_schema) > 1:
-            kept, declined = _resolve_schema_conflict(by_schema)
+        kept, declined = _majority_schema(by_schema)
+        # Only a table that would really have merged can turn a shard away.
+        # Where the majority is itself a single file, nothing was pairing.
+        if declined and len(kept) >= 2:
             conflicts.extend(_describe_conflicts(kept, declined))
-            shard_groups = [kept]
+            schema_groups = [kept]
         else:
-            shard_groups = list(by_schema.values())
+            schema_groups = list(by_schema.values())
 
-        for shards in shard_groups:
-            # The dataset root is not a table, so its own files never pair.
-            if len(shards) >= 2 and dir_path != ".":
-                groups.append((shards, True))
+        for shards in schema_groups:
+            if len(shards) >= 2:
+                groups.append((shards, template))
             else:
-                groups.extend(([file], False) for file in shards)
+                groups.extend(([file], None) for file in shards)
+
+    groups.extend(([file], None) for file in loners)
 
     alone = len(groups) == 1
-    return [_make_table(dir_path, g, p, alone) for g, p in groups], conflicts
+    # Naming and globbing ask different questions. A directory holding one
+    # table still names it, even having declined a shard; a glob standing in
+    # for that table's files would match the declined shard right back.
+    covers_dir = alone and not conflicts
+    return [
+        _make_table(dir_path, g, t, alone, covers_dir) for g, t in groups
+    ], conflicts
 
 
-def _resolve_schema_conflict(by_schema: dict) -> tuple:
-    """The largest shard group wins; the rest are declined rather than merged."""
+def _majority_schema(by_schema: dict) -> tuple:
+    """The largest shard group, and every file outside it."""
     ordered = sorted(
         by_schema.values(),
         key=lambda g: (-len(g), min(str(f.meta["relative_path"]) for f in g)),
@@ -193,9 +225,16 @@ def _describe_conflicts(kept: list, declined: list) -> list:
     ]
 
 
-def _make_table(dir_path: str, files: list, partitioned: bool, alone: bool) -> _Table:
+def _make_table(
+    dir_path: str,
+    files: list,
+    template: Optional[str],
+    alone: bool,
+    covers_dir: bool,
+) -> _Table:
     meta = files[0].meta
     parents = list(Path(meta["relative_path"]).parts[:-1])
+    partitioned = len(files) >= 2
 
     # Parquet basenames are usually partition labels, so a directory holding one
     # table names it better than its own files do. Once it holds several, the
@@ -203,7 +242,8 @@ def _make_table(dir_path: str, files: list, partitioned: bool, alone: bool) -> _
     if alone and parents:
         name, disambig_parents = parents[-1], parents[:-1]
     elif partitioned:
-        name, disambig_parents = _shared_stem(meta["file_name"]), parents
+        name = _shared_stem(template) or get_clean_record_name(meta["file_name"])
+        disambig_parents = parents
     else:
         name, disambig_parents = get_clean_record_name(meta["file_name"]), parents
 
@@ -215,15 +255,13 @@ def _make_table(dir_path: str, files: list, partitioned: bool, alone: bool) -> _
         disambig_parents=disambig_parents,
         is_partitioned=partitioned,
         alone_in_dir=alone,
+        covers_dir=covers_dir,
     )
 
 
-def _shared_stem(file_name: str) -> str:
+def _shared_stem(template: str) -> str:
     """What a table's shards have in common, so two do not become ``part-00000``."""
-    common = get_clean_record_name(partition_template(file_name))
-    return common.replace(DIGIT_MASK, "").rstrip("-_.") or get_clean_record_name(
-        file_name
-    )
+    return get_clean_record_name(template).replace(DIGIT_MASK, "").rstrip("-_.")
 
 
 class ParquetHandler(FileTypeHandler):
@@ -301,11 +339,12 @@ class ParquetHandler(FileTypeHandler):
         The id follows the record set's, which is already disambiguated: two
         directories sharing a name would otherwise claim the same one.
         """
-        if table.alone_in_dir:
+        if table.covers_dir:
             suffix = "".join(Path(table.first_meta["file_name"]).suffixes)
             includes = [f"{table.dir_path}/*{suffix}"]
         else:
-            # A directory-wide glob would reach into the neighbouring tables.
+            # A directory-wide glob would reach the neighbouring tables, and any
+            # shard whose schema kept it out of this one.
             includes = [f.meta["relative_path"] for f in table.files]
 
         return mlc.FileSet(
