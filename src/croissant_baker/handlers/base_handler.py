@@ -1,12 +1,84 @@
 """Abstract base class for file type handlers."""
 
+import dataclasses
 import warnings
 from abc import ABC, abstractmethod
 from enum import Enum
 from pathlib import Path
-from typing import Set
+from typing import TYPE_CHECKING, Set
 
 from croissant_baker.sources import FileSource
+
+if TYPE_CHECKING:  # pragma: no cover - only for the annotation
+    from croissant_baker.scan import Reason
+
+
+@dataclasses.dataclass(frozen=True)
+class Declined:
+    """One file a handler read and then chose not to describe.
+
+    ``index`` points into the ``file_metas`` the handler was given, because
+    that is the only name the handler and the generator share.
+    """
+
+    index: int
+    reason: "Reason"
+    detail: str
+
+
+@dataclasses.dataclass(frozen=True)
+class BuildResult:
+    """What ``build_croissant`` returns: what it described, and what it did not.
+
+    Iterating yields the ``(file_sets, record_sets)`` pair the contract used to
+    be, so a caller written against it keeps working, while everything inside
+    the baker reads fields by name and never sniffs a length.
+    """
+
+    file_sets: list
+    record_sets: list
+    declined: tuple = ()
+
+    def __iter__(self):
+        """The legacy pair. ``declined`` is reached by name, not by position."""
+        return iter((self.file_sets, self.record_sets))
+
+    @classmethod
+    def coerce(cls, value: object) -> "BuildResult":
+        """Validate whatever a handler returned, in one place.
+
+        Handlers are third-party code, so this is the boundary: a pair, a
+        triple or a ``BuildResult``, with the declined entries typed on the way
+        through. Anything else raises here rather than part-way through
+        assembly, where half a batch would already have been committed.
+        """
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, tuple) or not 2 <= len(value) <= 3:
+            raise TypeError(
+                "build_croissant must return (file_sets, record_sets) or a "
+                f"BuildResult; got {type(value).__name__} {value!r}"
+            )
+        return cls(
+            list(value[0]),
+            list(value[1]),
+            tuple(
+                _as_declined(entry) for entry in (value[2] if len(value) == 3 else ())
+            ),
+        )
+
+
+def _as_declined(entry: object) -> Declined:
+    """One declined entry, however a handler spelled it."""
+    if isinstance(entry, Declined):
+        return entry
+    if not isinstance(entry, (tuple, list)) or len(entry) != 3:
+        raise ValueError(
+            "each declined entry must be (index, Reason, detail) or a "
+            f"Declined; got {entry!r}"
+        )
+    index, reason, detail = entry
+    return Declined(int(index), reason, str(detail))
 
 
 class InputKind(str, Enum):

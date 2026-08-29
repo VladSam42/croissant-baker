@@ -15,7 +15,7 @@ import re
 
 import mlcroissant as mlc
 
-from croissant_baker.handlers.base_handler import FileTypeHandler
+from croissant_baker.handlers.base_handler import BuildResult, FileTypeHandler
 from croissant_baker.sources import FileSource
 from croissant_baker.handlers.utils import (
     SCHEMA_SAMPLE,
@@ -229,4 +229,4 @@ class JSONHandler(FileTypeHandler):
                 )
             )
 
-        return [], record_sets
+        return BuildResult([], record_sets)

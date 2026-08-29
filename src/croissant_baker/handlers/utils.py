@@ -164,7 +164,6 @@ def make_record_set_ids(file_metas: list) -> list:
 
 
 DIGIT_MASK = "<N>"
-_DIGIT_RUN = re.compile(r"\d+")
 
 # A shard index stands on its own: it is either the whole stem or introduced by
 # a separator. Digits fused to letters belong to a word instead — ``assay1`` and
@@ -176,12 +175,13 @@ def shard_template(file_name: str) -> Optional[str]:
     """The name with digit runs masked, or None if it carries no shard index.
 
     Shards of one table differ only in that index, so the masked name is the
-    key they share. Every digit run is masked, not just the index: Spark writes
-    a job uuid into the name that is constant across one write anyway.
+    key they share. Only separated runs are masked: digits fused to letters
+    name the table, so ``assay1-part-000`` and ``assay2-part-001`` stay two
+    tables rather than collapsing into one.
     """
     if not _SHARD_INDEX.search(file_name):
         return None
-    return _DIGIT_RUN.sub(DIGIT_MASK, file_name)
+    return _SHARD_INDEX.sub(DIGIT_MASK, file_name)
 
 
 def make_field_id(record_set_id: str, column_name: str, used_field_ids: set) -> str:

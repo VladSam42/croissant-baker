@@ -147,7 +147,9 @@ def test_parse_conflict_unknown_falls_back_to_all_string(tmp_path: Path) -> None
     csv_file.write_text("a,b,c\n1,2,3\n")
     seen_overrides = []
 
-    def fake_read(file_path, convert_options, count_rows=False, delimiter=","):
+    def fake_read(
+        file_path, convert_options, count_rows=False, delimiter=",", skip_rows=0
+    ):
         overrides = {k: str(v) for k, v in (convert_options.column_types or {}).items()}
         seen_overrides.append(overrides)
         if overrides == {"a": "string", "b": "string", "c": "string"}:
@@ -181,3 +183,38 @@ def test_no_fd_leak_on_schema_only_reads(tmp_path: Path) -> None:
     handler = CSVHandler()
     for f in files:
         handler.extract(make_source(f), count_rows=False)
+
+
+# --- A comment preamble is metadata, not a malformed row --------------------
+
+_PROBE_SET = (
+    "#probe_set_file_format=2.0\n"
+    "#panel_name=Visium Human Transcriptome Probe Set v2.0\n"
+    "#reference_genome=GRCh38\n"
+    "gene_id,probe_seq,included\n"
+    "ENSG00000000003,GGTGACACC,TRUE\n"
+    "ENSG00000000005,TCTGCATCT,TRUE\n"
+)
+
+
+def test_a_comment_preamble_does_not_fail_the_read(tmp_path: Path) -> None:
+    """10x probe-set CSVs lead with ``#`` lines; PyArrow read them as a
+    one-column table and then rejected the real five-column header."""
+    path = tmp_path / "probe_set.csv"
+    path.write_text(_PROBE_SET, encoding="utf-8")
+
+    meta = CSVHandler().extract(make_source(path, Path("probe_set.csv")))
+
+    assert meta["columns"] == ["gene_id", "probe_seq", "included"]
+    assert meta["num_columns"] == 3
+
+
+def test_a_hash_inside_data_is_not_treated_as_a_comment(tmp_path: Path) -> None:
+    """Only a leading run of ``#`` lines is a preamble; ``#`` elsewhere is data."""
+    path = tmp_path / "notes.csv"
+    path.write_text("id,note\n1,#1 ranked\n2,plain\n", encoding="utf-8")
+
+    meta = CSVHandler().extract(make_source(path, Path("notes.csv")))
+
+    assert meta["columns"] == ["id", "note"]
+    assert meta["num_columns"] == 2

@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 import mlcroissant as mlc
 import pydicom
 
-from croissant_baker.handlers.base_handler import FileTypeHandler
+from croissant_baker.handlers.base_handler import BuildResult, FileTypeHandler
 from croissant_baker.sources import FileSource
 
 logger = logging.getLogger(__name__)
@@ -161,6 +161,11 @@ class DICOMHandler(FileTypeHandler):
     def build_croissant(
         self, file_metas: list[dict], file_ids: list[str]
     ) -> tuple[list, list]:
+        # An empty batch has nothing to summarise; emitting a FileSet over
+        # zero files would describe data that is not there.
+        if not file_metas:
+            return BuildResult([], [])
+
         summary = collect_dicom_summary(file_metas)
 
         num_files = summary.get("num_files", len(file_metas))
@@ -282,7 +287,7 @@ class DICOMHandler(FileTypeHandler):
             fields=fields,
         )
 
-        return [dicom_fileset], [dicom_record_set]
+        return BuildResult([dicom_fileset], [dicom_record_set])
 
 
 def collect_dicom_summary(dicom_metadata_list: List[Dict]) -> Dict:

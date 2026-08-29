@@ -5,7 +5,11 @@ import wfdb
 
 import mlcroissant as mlc
 
-from croissant_baker.handlers.base_handler import FileTypeHandler, InputKind
+from croissant_baker.handlers.base_handler import (
+    BuildResult,
+    FileTypeHandler,
+    InputKind,
+)
 from croissant_baker.sources import FileSource, PathSource
 from croissant_baker.handlers.utils import (
     _disambiguate_ids,
@@ -178,4 +182,4 @@ class WFDBHandler(FileTypeHandler):
                 )
             )
 
-        return [], record_sets
+        return BuildResult([], record_sets)

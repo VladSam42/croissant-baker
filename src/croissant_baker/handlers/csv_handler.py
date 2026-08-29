@@ -7,7 +7,7 @@ import mlcroissant as mlc
 import pyarrow as pa
 import pyarrow.csv as pa_csv
 
-from croissant_baker.handlers.base_handler import FileTypeHandler
+from croissant_baker.handlers.base_handler import BuildResult, FileTypeHandler
 from croissant_baker.sources import FileSource
 from croissant_baker.handlers.utils import (
     get_clean_record_name,
@@ -86,6 +86,7 @@ class CSVHandler(FileTypeHandler):
         overrides: dict = {}
         col_names: list | None = None
         delimiter = self._delimiter()
+        skip_rows = self._preamble_rows(source)
 
         for _ in range(_MAX_TYPE_CONFLICT_RETRIES):
             opts = pa_csv.ConvertOptions(
@@ -94,7 +95,11 @@ class CSVHandler(FileTypeHandler):
             )
             try:
                 result = self._read_streaming(
-                    source, opts, count_rows=count_rows, delimiter=delimiter
+                    source,
+                    opts,
+                    count_rows=count_rows,
+                    delimiter=delimiter,
+                    skip_rows=skip_rows,
                 )
                 if overrides:
                     logger.info(
@@ -105,7 +110,9 @@ class CSVHandler(FileTypeHandler):
                 return result
             except pa.lib.ArrowInvalid as exc:
                 if col_names is None:
-                    col_names = self._header(source, delimiter=delimiter)
+                    col_names = self._header(
+                        source, delimiter=delimiter, skip_rows=skip_rows
+                    )
 
                 idx, inferred = self._parse_conflict(str(exc))
 
@@ -128,7 +135,7 @@ class CSVHandler(FileTypeHandler):
 
         # Last resort: read everything as strings.
         if col_names is None:
-            col_names = self._header(source, delimiter=delimiter)
+            col_names = self._header(source, delimiter=delimiter, skip_rows=skip_rows)
         if len(overrides) >= _MAX_TYPE_CONFLICT_RETRIES:
             logger.warning(
                 "%s: hit type conflict limit (%d), falling back to all-string types",
@@ -144,8 +151,35 @@ class CSVHandler(FileTypeHandler):
             column_types={n: pa.string() for n in col_names},
         )
         return self._read_streaming(
-            source, opts, count_rows=count_rows, delimiter=delimiter
+            source,
+            opts,
+            count_rows=count_rows,
+            delimiter=delimiter,
+            skip_rows=skip_rows,
         )
+
+    #: A leading ``#`` block is a metadata preamble, not data. 10x probe-set
+    #: exports lead with one; PyArrow has no comment option, so the rows are
+    #: counted and skipped instead. Bounded, because a file that is entirely
+    #: comments has no header to find and is not a preamble at all.
+    _COMMENT_PREFIX = "#"
+    _MAX_PREAMBLE_ROWS = 100
+
+    @classmethod
+    def _preamble_rows(cls, source: FileSource) -> int:
+        """How many leading comment lines precede the header row."""
+        rows = 0
+        try:
+            with source.open_text() as fh:
+                for line in fh:
+                    if not line.startswith(cls._COMMENT_PREFIX):
+                        return rows
+                    rows += 1
+                    if rows > cls._MAX_PREAMBLE_ROWS:
+                        return 0
+        except (OSError, UnicodeDecodeError, EOFError):
+            return 0
+        return 0
 
     @staticmethod
     def _read_streaming(
@@ -153,6 +187,7 @@ class CSVHandler(FileTypeHandler):
         convert_options,
         count_rows: bool = False,
         delimiter: str = ",",
+        skip_rows: int = 0,
     ):
         """Open a streaming reader, extract schema, and optionally count rows.
 
@@ -173,6 +208,7 @@ class CSVHandler(FileTypeHandler):
             with stream:
                 reader_cm = pa_csv.open_csv(
                     stream,
+                    read_options=pa_csv.ReadOptions(skip_rows=skip_rows),
                     convert_options=convert_options,
                     parse_options=parse_options,
                 )
@@ -199,11 +235,15 @@ class CSVHandler(FileTypeHandler):
         return (int(m.group(1)), m.group(2)) if m else (None, None)
 
     @staticmethod
-    def _header(source: FileSource, delimiter: str = ",") -> list[str]:
+    def _header(
+        source: FileSource, delimiter: str = ",", skip_rows: int = 0
+    ) -> list[str]:
         with (
             source.open() as stream,
             pa_csv.open_csv(
-                stream, parse_options=pa_csv.ParseOptions(delimiter=delimiter)
+                stream,
+                read_options=pa_csv.ReadOptions(skip_rows=skip_rows),
+                parse_options=pa_csv.ParseOptions(delimiter=delimiter),
             ) as reader,
         ):
             return reader.schema.names
@@ -320,4 +360,4 @@ class CSVHandler(FileTypeHandler):
                 )
             )
 
-        return [], record_sets
+        return BuildResult([], record_sets)

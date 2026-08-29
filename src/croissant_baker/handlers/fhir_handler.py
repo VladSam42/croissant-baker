@@ -17,7 +17,7 @@ from typing import Optional
 
 import mlcroissant as mlc
 
-from croissant_baker.handlers.base_handler import FileTypeHandler
+from croissant_baker.handlers.base_handler import BuildResult, FileTypeHandler
 from croissant_baker.sources import FileSource
 from croissant_baker.handlers.utils import (
     SCHEMA_SAMPLE,
@@ -461,7 +461,7 @@ class FHIRHandler(FileTypeHandler):
                 sorted({m.get("fhir_resource_type", "unknown") for m in file_metas}),
             )
 
-        return additional_distributions, record_sets
+        return BuildResult(additional_distributions, record_sets)
 
     def _build_fields(
         self,

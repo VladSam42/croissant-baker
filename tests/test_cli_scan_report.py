@@ -48,7 +48,7 @@ def test_summary_states_described_and_undescribed_counts(
 
     assert result.exit_code == 0
     assert "Scanned 3 file(s): 1 described, 2 not described." in result.stdout
-    assert "no registered handler: 1" in result.stdout
+    assert "no handler: 1" in result.stdout
     assert "extraction failed: 1" in result.stdout
 
 
@@ -123,7 +123,7 @@ def test_verbose_names_every_undescribed_file_and_reason(
     result = _run(mixed_dataset, tmp_path, "--verbose")
 
     assert result.exit_code == 0
-    assert "opaque.bin: no registered handler claims this file" in result.stdout
+    assert "opaque.bin: no handler for this file type" in result.stdout
     assert "broken.json:" in result.stdout
     # the prompt is redundant once detail has been printed
     assert "Tip: re-run with --verbose" not in result.stdout
@@ -191,7 +191,7 @@ def test_dry_run_lists_files_that_would_not_be_described(
     assert "would be processed" in result.stdout
     assert "table.csv" in result.stdout
     assert "1 file(s) would not be described" in result.stdout
-    assert "opaque.bin: no registered handler claims this file" in result.stdout
+    assert "opaque.bin: no handler for this file type" in result.stdout
 
 
 def test_dry_run_stays_quiet_when_everything_is_claimed(
@@ -255,7 +255,7 @@ def test_bake_with_no_describable_files_names_the_reason(tmp_path: Path) -> None
     # The coverage summary still explains which files were found, and why none
     # of them could be described.
     assert "Scanned 2 file(s): 0 described, 2 not described." in result.stdout
-    assert "no registered handler: 2" in result.stdout
+    assert "no handler: 2" in result.stdout
 
 
 def test_failed_bake_still_writes_a_report(tmp_path: Path) -> None:

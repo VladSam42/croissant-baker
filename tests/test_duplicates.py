@@ -176,14 +176,16 @@ def test_two_plain_files_of_different_size_are_rejected_without_reading(
     dataset: Path, monkeypatch
 ) -> None:
     """The free half of rule 3: stat() settles it, so nothing is decompressed."""
-    from croissant_baker import scan
+    from croissant_baker import duplicates
 
     write_wrapped(dataset, "sample.csv", CSV)
     write_wrapped(dataset, "sample.tsv", CSV + b"id3,Alan\n")
 
     reads = []
-    real = scan._read_prefix
-    monkeypatch.setattr(scan, "_read_prefix", lambda p: reads.append(p) or real(p))
+    real = duplicates._read_prefix
+    monkeypatch.setattr(
+        duplicates, "_read_prefix", lambda p: reads.append(p) or real(p)
+    )
 
     assert all(
         e.outcome is Outcome.DESCRIBED for e in bake_with_report(dataset)[1].entries
@@ -210,7 +212,7 @@ def test_files_in_different_directories_never_link(dataset: Path) -> None:
 
 def test_a_prefix_read_is_capped(tmp_path: Path) -> None:
     """A duplicate check must not turn into reading a terabyte."""
-    from croissant_baker.scan import _read_prefix
+    from croissant_baker.duplicates import _read_prefix
 
     big = tmp_path / "big.csv"
     big.write_bytes(b"x" * (PREFIX_BYTES * 3))
@@ -219,7 +221,7 @@ def test_a_prefix_read_is_capped(tmp_path: Path) -> None:
 
 
 def test_an_unreadable_candidate_is_not_a_duplicate(tmp_path: Path) -> None:
-    from croissant_baker.scan import _read_prefix
+    from croissant_baker.duplicates import _read_prefix
 
     assert _read_prefix(tmp_path / "absent.csv") is None
 

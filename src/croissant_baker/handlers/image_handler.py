@@ -6,7 +6,7 @@ from typing import Dict, List
 
 import mlcroissant as mlc
 
-from croissant_baker.handlers.base_handler import FileTypeHandler
+from croissant_baker.handlers.base_handler import BuildResult, FileTypeHandler
 from croissant_baker.sources import FileSource
 
 logger = logging.getLogger(__name__)
@@ -92,7 +92,9 @@ def _has_image_magic(source: FileSource) -> bool:
         return False
     if check(head):
         return True
-    logger.warning(
+    # Debug, not warning: the generator names every undescribed file once
+    # through a capped path, so warning here doubles it and escapes the cap.
+    logger.debug(
         "Skipping %s: extension is %s but file content does not match the "
         "expected image magic bytes",
         source.relative_path,
@@ -233,6 +235,11 @@ class ImageHandler(FileTypeHandler):
         }
 
     def build_croissant(self, file_metas: list, file_ids: list) -> tuple:
+        # An empty batch has nothing to summarise; emitting a FileSet over
+        # zero files would describe data that is not there.
+        if not file_metas:
+            return BuildResult([], [])
+
         summary = collect_image_summary(file_metas)
         w_lo, w_hi = summary["width_range"]
         h_lo, h_hi = summary["height_range"]
@@ -286,7 +293,7 @@ class ImageHandler(FileTypeHandler):
             fields=image_fields,
         )
 
-        return [image_fileset], [image_record_set]
+        return BuildResult([image_fileset], [image_record_set])
 
 
 def collect_image_summary(image_metadata_list: List[Dict]) -> Dict:

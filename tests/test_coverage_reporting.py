@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from croissant_baker.handlers.base_handler import FileTypeHandler
 from croissant_baker.handlers.csv_handler import CSVHandler
 from croissant_baker.handlers.registry import HandlerRegistry
 from croissant_baker.handlers.tsv_handler import TSVHandler
@@ -68,7 +69,7 @@ def test_every_discovered_file_is_accounted_for(report: ScanReport) -> None:
 @pytest.mark.parametrize(
     ("name", "reason", "in_detail"),
     [
-        ("mystery.xyz", Reason.NO_HANDLER, ["no registered handler"]),
+        ("mystery.xyz", Reason.NO_HANDLER, ["no handler"]),
         ("broken.nii", Reason.EXTRACT_FAILED, ["broken.nii"]),
         ("bundle.zip", Reason.ARCHIVE, ["does not open archives"]),
         ("record.hea.gz", Reason.UNSUPPORTED_INPUT, ["WFDB", "on disk", "gzip"]),
@@ -235,7 +236,7 @@ def test_an_undescribed_file_is_warned_about_as_it_is_scanned(tmp_path, caplog):
         MetadataGenerator(dataset_path=str(tmp_path)).generate_metadata()
 
     assert any(
-        "notes.md" in r.getMessage() and "no registered handler" in r.getMessage()
+        "notes.md" in r.getMessage() and "no handler" in r.getMessage()
         for r in caplog.records
     ), [r.getMessage() for r in caplog.records]
 
@@ -243,7 +244,8 @@ def test_an_undescribed_file_is_warned_about_as_it_is_scanned(tmp_path, caplog):
 def test_a_file_that_fails_to_parse_names_itself(tmp_path, caplog):
     """The message that went missing in the refactor: which file, and why."""
     (tmp_path / "ok.csv").write_text("a,b\n1,2\n")
-    (tmp_path / "broken.csv").write_text("# preamble\na,b,c,d,e\n1,2,3,4,5\n")
+    # Two header columns, three in the row: malformed however it is read.
+    (tmp_path / "broken.csv").write_text("a,b\n1,2,3\n")
 
     with caplog.at_level(logging.WARNING, logger="croissant_baker"):
         MetadataGenerator(dataset_path=str(tmp_path)).generate_metadata()
@@ -304,3 +306,73 @@ def test_a_malformed_handler_return_costs_only_its_batch(tmp_path, caplog):
 
     assert [rs["name"] for rs in result["recordSet"]] == ["two"]
     assert any("one.csv" in r.getMessage() for r in caplog.records)
+
+
+# --------------------------------------------------------------------------
+# A handler's return shape cannot cost the bake
+# --------------------------------------------------------------------------
+
+
+class _BadReturnHandler(FileTypeHandler):
+    """Claims ``.brk`` and returns whatever shape the test asks for."""
+
+    EXTENSIONS = (".brk",)
+    FORMAT_NAME = "Broken"
+
+    def __init__(self, built) -> None:
+        self._built = built
+
+    def claims(self, source) -> bool:
+        return source.suffix == ".brk"
+
+    def extract(self, source, **kwargs) -> dict:
+        return {
+            "file_name": source.name,
+            "file_size": source.size,
+            "sha256": source.sha256,
+            "encoding_format": "application/x-brk",
+        }
+
+    def build_croissant(self, file_metas, file_ids):
+        return self._built
+
+
+@pytest.mark.parametrize(
+    "built",
+    [
+        ([], [], "valid"),
+        ([], [], [("not-an-index", "nope")]),
+        ([], [], [(0,)]),
+        "not a tuple at all",
+        ([],),
+    ],
+)
+def test_a_malformed_handler_return_costs_its_batch_only(built, dataset) -> None:
+    """Arity is checked, but the declined list is unpacked too — both inside
+    the guard, or a handler crashes the run rather than its own batch."""
+    write_wrapped(dataset, "probe.brk", b"payload")
+    write_wrapped(dataset, "keep.csv", CSV)
+
+    metadata, report = bake_with([_BadReturnHandler(built)], dataset)
+
+    assert _entry(report, "probe.brk").outcome is Outcome.FAILED
+    assert _entry(report, "probe.brk").reason is Reason.BUILD_FAILED
+    assert [rs["@id"] for rs in metadata["recordSet"]] == ["keep"]
+
+
+def test_per_file_warnings_are_capped_across_every_source(dataset, caplog) -> None:
+    """The cap is a promise about output volume, so a handler's own warnings
+    count against it too."""
+    from croissant_baker.metadata_generator import MAX_UNDESCRIBED_WARNINGS
+
+    write_wrapped(dataset, "keep.csv", CSV)
+    for i in range(70):
+        # No PAR1 header: the handler warns as it declines, and the
+        # generator warns again as the file goes undescribed.
+        write_wrapped(dataset, f"broken{i:03d}.parquet", b"NOPE not a parquet file")
+
+    with caplog.at_level("WARNING"):
+        bake_with_report(dataset)
+
+    named = [r for r in caplog.records if "broken" in r.getMessage()]
+    assert len(named) <= MAX_UNDESCRIBED_WARNINGS + 1, len(named)

@@ -9,7 +9,11 @@ from pathlib import Path
 import mlcroissant as mlc
 from pyarrow.parquet import ParquetFile
 
-from croissant_baker.handlers.base_handler import FileTypeHandler
+from croissant_baker.handlers.base_handler import (
+    BuildResult,
+    Declined,
+    FileTypeHandler,
+)
 from croissant_baker.scan import Reason
 from croissant_baker.sources import FileSource
 from croissant_baker.handlers.utils import (
@@ -55,15 +59,18 @@ def _has_parquet_magic(source: FileSource) -> bool:
     """Return True iff ``source`` has the Parquet magic at start and end.
 
     Files that fail any check (too small, missing PAR1 header, missing PAR1
-    footer) are rejected and a WARNING is logged with the specific reason so
-    the user can see which files were skipped and why. Missing or unreadable
-    files return False without logging (caller errors, not impostors). The
-    footer check costs a full pass on a compressed file.
+    footer) are rejected, and the specific reason is logged at debug. Missing
+    or unreadable files return False without logging (caller errors, not
+    impostors). The footer check costs a full pass on a compressed file.
+
+    A refusal at claim time is logged at debug, not warning: the generator
+    already names every undescribed file once, through a capped path, and
+    warning here both doubled that and escaped the cap.
     """
     if not source.exists:
         return False
     if source.size < _PARQUET_MAGIC_LEN * 2:
-        logger.warning(
+        logger.debug(
             "Skipping %s: file is too small (%d bytes) to be a valid Parquet file",
             source.relative_path,
             source.size,
@@ -72,13 +79,13 @@ def _has_parquet_magic(source: FileSource) -> bool:
     try:
         with source.open() as f:
             if f.read(_PARQUET_MAGIC_LEN) != _PARQUET_MAGIC:
-                logger.warning(
+                logger.debug(
                     "Skipping %s: missing Parquet PAR1 header magic",
                     source.relative_path,
                 )
                 return False
             if _tail(f, _PARQUET_MAGIC_LEN) != _PARQUET_MAGIC:
-                logger.warning(
+                logger.debug(
                     "Skipping %s: missing Parquet PAR1 footer magic "
                     "(file may be truncated)",
                     source.relative_path,
@@ -124,7 +131,10 @@ def _schema_of(meta: dict) -> str:
     schema = meta.get("arrow_schema")
     if schema is None:
         return str(list(meta["column_types"].items()))
-    return str(schema.remove_metadata())
+    # Names and types only, which is what ``Schema.equals`` compares by
+    # default. Rendering the schema kept field-level metadata in the key, so
+    # two shards Arrow calls equal could land in different groups.
+    return str([(field.name, str(field.type)) for field in schema])
 
 
 def _group_tables(file_metas: list, file_ids: list) -> tuple:
@@ -202,12 +212,43 @@ def _tables_in_dir(dir_path: str, files: list) -> tuple:
     ], conflicts
 
 
+def _file_set_ids(tables: list, rs_ids: list) -> dict:
+    """A FileSet id per partitioned table, unique against every record set too.
+
+    ``@id`` is unique document-wide in Croissant, not per node kind. Deriving
+    the FileSet id from its record set's is not enough on its own: a file
+    genuinely named ``sales-fileset.parquet`` produces a record set that claims
+    the derived id first, and the document then carries two nodes under one id.
+    """
+    taken = set(rs_ids)
+    out: dict = {}
+    for table, rs_id in zip(tables, rs_ids):
+        if not table.is_partitioned:
+            continue
+        candidate = f"{rs_id}-fileset"
+        n = 2
+        while candidate in taken:
+            candidate = f"{rs_id}-fileset__{n}"
+            n += 1
+        taken.add(candidate)
+        out[rs_id] = candidate
+    return out
+
+
 def _majority_schema(by_schema: dict) -> tuple:
-    """The largest shard group, and every file outside it."""
+    """The strictly-largest shard group, and every file outside it.
+
+    A tie is not a majority. Two shards of each of two schemas gives no reason
+    to prefer either, and breaking it on filename order would discard half the
+    directory on the strength of alphabetical accident — so ``([], [])`` is
+    returned and the caller describes every group instead.
+    """
     ordered = sorted(
         by_schema.values(),
         key=lambda g: (-len(g), min(str(f.meta["relative_path"]) for f in g)),
     )
+    if len(ordered) > 1 and len(ordered[0]) == len(ordered[1]):
+        return [], []
     return ordered[0], [file for group in ordered[1:] for file in group]
 
 
@@ -215,7 +256,7 @@ def _describe_conflicts(kept: list, declined: list) -> list:
     expected = len(kept[0].meta["column_types"])
     reference = kept[0].meta["file_name"]
     return [
-        (
+        Declined(
             file.index,
             Reason.PARTITION_SCHEMA_CONFLICT,
             f"{len(file.meta['column_types'])} columns, "
@@ -321,24 +362,23 @@ class ParquetHandler(FileTypeHandler):
         """
         tables, conflicts = _group_tables(file_metas, file_ids)
         rs_ids = _disambiguate_ids([(t.stem, t.disambig_parents) for t in tables])
+        fs_ids = _file_set_ids(tables, rs_ids)
 
         file_sets = []
         record_sets = []
         for table, rs_id in zip(tables, rs_ids):
             if table.is_partitioned:
-                file_sets.append(self._partition_file_set(table, rs_id))
-                record_sets.append(self._partition_record_set(table, rs_id))
+                file_sets.append(self._partition_file_set(table, rs_id, fs_ids[rs_id]))
+                record_sets.append(
+                    self._partition_record_set(table, rs_id, fs_ids[rs_id])
+                )
             else:
                 record_sets.append(self._standalone_record_set(table, rs_id))
 
-        return file_sets, record_sets, conflicts
+        return BuildResult(file_sets, record_sets, tuple(conflicts))
 
-    def _partition_file_set(self, table: _Table, rs_id: str) -> mlc.FileSet:
-        """One FileSet over a table's shards.
-
-        The id follows the record set's, which is already disambiguated: two
-        directories sharing a name would otherwise claim the same one.
-        """
+    def _partition_file_set(self, table: _Table, rs_id: str, fs_id: str) -> mlc.FileSet:
+        """One FileSet over a table's shards."""
         if table.covers_dir:
             suffix = "".join(Path(table.first_meta["file_name"]).suffixes)
             includes = [f"{table.dir_path}/*{suffix}"]
@@ -348,18 +388,20 @@ class ParquetHandler(FileTypeHandler):
             includes = [f.meta["relative_path"] for f in table.files]
 
         return mlc.FileSet(
-            id=f"{rs_id}-fileset",
+            id=fs_id,
             name=f"{table.name} partition files",
             description=f"{len(table.files)} Parquet partition files for table '{table.name}'",
             encoding_formats=["application/vnd.apache.parquet"],
             includes=includes,
         )
 
-    def _partition_record_set(self, table: _Table, rs_id: str) -> mlc.RecordSet:
+    def _partition_record_set(
+        self, table: _Table, rs_id: str, fs_id: str
+    ) -> mlc.RecordSet:
         fields = self._fields(
             table.first_meta,
             rs_id,
-            {"file_set": f"{rs_id}-fileset"},
+            {"file_set": fs_id},
             f"table '{table.name}'",
         )
         num_rows = sum(f.meta.get("num_rows", 0) for f in table.files)

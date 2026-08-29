@@ -169,3 +169,107 @@ def test_no_builtin_is_still_on_the_legacy_contract(name: str) -> None:
     handler = HANDLERS[name]
     assert not uses_legacy_claims(handler), f"{name} still implements can_handle"
     assert not uses_legacy_extract(handler), f"{name} still implements extract_metadata"
+
+
+# --------------------------------------------------------------------------
+# One result shape, whatever the handler chose to describe
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_every_handler_returns_a_build_result(name: str) -> None:
+    """Not a 2-tuple from eight handlers and a 3-tuple from one. A caller
+    reads ``.file_sets`` / ``.record_sets`` / ``.declined`` without sniffing."""
+    from croissant_baker.handlers.base_handler import BuildResult
+
+    result = HANDLERS[name].build_croissant([], [])
+
+    assert isinstance(result, BuildResult)
+    assert isinstance(result.file_sets, list)
+    assert isinstance(result.record_sets, list)
+    assert result.declined == ()
+
+
+def test_a_build_result_still_unpacks_as_a_pair() -> None:
+    """Direct callers written against ``(file_sets, record_sets)`` keep working."""
+    from croissant_baker.handlers.base_handler import BuildResult
+
+    file_sets, record_sets = BuildResult(["fs"], ["rs"])
+
+    assert (file_sets, record_sets) == (["fs"], ["rs"])
+
+
+@pytest.mark.parametrize(
+    "returned",
+    [
+        (["fs"], ["rs"]),
+        (["fs"], ["rs"], ()),
+    ],
+)
+def test_a_legacy_tuple_return_is_accepted(returned) -> None:
+    """Criterion 8: a handler written against the old contract keeps working."""
+    from croissant_baker.handlers.base_handler import BuildResult
+
+    result = BuildResult.coerce(returned)
+
+    assert result.file_sets == ["fs"] and result.record_sets == ["rs"]
+    assert result.declined == ()
+
+
+@pytest.mark.parametrize(
+    "returned",
+    [
+        "not a tuple",
+        ([],),
+        ([], [], "valid"),
+        ([], [], [(0,)]),
+        ([], [], [("a", "b", "c")]),
+    ],
+)
+def test_a_malformed_return_is_refused_by_coercion(returned) -> None:
+    """One validation point, so the generator never unpacks a surprise."""
+    from croissant_baker.handlers.base_handler import BuildResult
+
+    with pytest.raises((TypeError, ValueError)):
+        BuildResult.coerce(returned)
+
+
+def test_declined_entries_are_typed() -> None:
+    from croissant_baker.handlers.base_handler import BuildResult, Declined
+    from croissant_baker.scan import Reason
+
+    result = BuildResult.coerce(([], [], [(2, Reason.BUILD_FAILED, "why")]))
+
+    assert result.declined == (Declined(2, Reason.BUILD_FAILED, "why"),)
+
+
+# --------------------------------------------------------------------------
+# The public import surface survives the module layout
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("module", "name"),
+    [
+        ("croissant_baker.scan", "Outcome"),
+        ("croissant_baker.scan", "Reason"),
+        ("croissant_baker.scan", "ScanEntry"),
+        ("croissant_baker.scan", "ScanReport"),
+        ("croissant_baker.scan", "scan_directory"),
+        ("croissant_baker.scan", "resolve_duplicates"),
+        ("croissant_baker.scan", "choose_primary"),
+        ("croissant_baker.scan", "PREFIX_BYTES"),
+        ("croissant_baker.metadata_generator", "MetadataGenerator"),
+        ("croissant_baker.metadata_generator", "serialize_datetime"),
+        ("croissant_baker.handlers.registry", "find_handler"),
+        ("croissant_baker.handlers.registry", "register_all_handlers"),
+        ("croissant_baker.handlers.base_handler", "BuildResult"),
+        ("croissant_baker.handlers.base_handler", "FileTypeHandler"),
+    ],
+)
+def test_the_documented_import_paths_keep_working(module: str, name: str) -> None:
+    """Downstream code — biotope among it — imports these by path. Splitting a
+    module for cohesion must not move a name out from under them."""
+    import importlib
+
+    assert hasattr(importlib.import_module(module), name), f"{module}.{name}"

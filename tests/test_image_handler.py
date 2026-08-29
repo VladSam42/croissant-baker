@@ -103,12 +103,14 @@ def test_can_handle_rejects_wrong_magic(
     """
     impostor = tmp_path / "fake.png"
     impostor.write_bytes(b"<!DOCTYPE html><html></html>")
-    with caplog.at_level("WARNING", logger="croissant_baker.handlers.image_handler"):
+    with caplog.at_level("DEBUG", logger="croissant_baker.handlers.image_handler"):
         assert handler.claims(make_source(impostor)) is False
     assert any(
         impostor.name in r.message and "magic bytes" in r.message
         for r in caplog.records
-    ), f"expected a WARNING naming {impostor} and 'magic bytes', got {caplog.records}"
+    ), (
+        f"expected a debug record naming {impostor} and 'magic bytes', got {caplog.records}"
+    )
 
 
 def test_can_handle_missing_file_does_not_warn(
@@ -116,7 +118,7 @@ def test_can_handle_missing_file_does_not_warn(
 ) -> None:
     """A missing file is silently rejected (no spurious warnings) since the
     caller, not the file, is at fault."""
-    with caplog.at_level("WARNING", logger="croissant_baker.handlers.image_handler"):
+    with caplog.at_level("DEBUG", logger="croissant_baker.handlers.image_handler"):
         assert handler.claims(make_source(Path("/nonexistent/photo.png"))) is False
     assert caplog.records == []
 

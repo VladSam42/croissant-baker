@@ -57,7 +57,7 @@ def test_can_handle_missing_file_does_not_warn(
 ) -> None:
     """A missing .parquet path is silently rejected (no spurious warning)
     since the caller, not the file, is at fault."""
-    with caplog.at_level("WARNING", logger=_PARQUET_LOGGER):
+    with caplog.at_level("DEBUG", logger=_PARQUET_LOGGER):
         assert handler.claims(make_source(Path("/nonexistent/data.parquet"))) is False
     assert caplog.records == []
 
@@ -65,21 +65,24 @@ def test_can_handle_missing_file_does_not_warn(
 def test_can_handle_rejects_wrong_magic(
     handler: ParquetHandler, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A .parquet file without PAR1 magic is rejected AND a WARNING is
-    logged identifying the file and the missing PAR1 header.
+    """A .parquet file without PAR1 magic is rejected AND the reason is
+    logged at debug identifying the file and the missing PAR1 header.
 
     Regression for #93: prevents the registry from dispatching a renamed
     file to ParquetHandler.extract_metadata and crashing inside pyarrow,
-    while still surfacing the skip so the user knows what was dropped.
+    while still recording the skip. The generator owns the user-facing
+    warning, through a capped path, so this one is debug-level.
     """
     impostor = tmp_path / "fake.parquet"
     impostor.write_bytes(b"not a parquet file at all")
-    with caplog.at_level("WARNING", logger=_PARQUET_LOGGER):
+    with caplog.at_level("DEBUG", logger=_PARQUET_LOGGER):
         assert handler.claims(make_source(impostor)) is False
     assert any(
         impostor.name in r.message and "PAR1 header" in r.message
         for r in caplog.records
-    ), f"expected a WARNING naming {impostor} and 'PAR1 header', got {caplog.records}"
+    ), (
+        f"expected a debug record naming {impostor} and 'PAR1 header', got {caplog.records}"
+    )
 
 
 def test_can_handle_rejects_truncated_parquet(
@@ -89,14 +92,14 @@ def test_can_handle_rejects_truncated_parquet(
     AND a WARNING explicitly mentions the missing footer / possible truncation."""
     truncated = tmp_path / "truncated.parquet"
     truncated.write_bytes(b"PAR1" + b"\x00" * 32)
-    with caplog.at_level("WARNING", logger=_PARQUET_LOGGER):
+    with caplog.at_level("DEBUG", logger=_PARQUET_LOGGER):
         assert handler.claims(make_source(truncated)) is False
     assert any(
         truncated.name in r.message
         and ("footer" in r.message or "truncated" in r.message)
         for r in caplog.records
     ), (
-        f"expected a WARNING naming {truncated} and footer/truncated, got {caplog.records}"
+        f"expected a debug record naming {truncated} and footer/truncated, got {caplog.records}"
     )
 
 
@@ -107,11 +110,11 @@ def test_can_handle_rejects_too_small_parquet(
     with a WARNING that names the file and its size."""
     tiny = tmp_path / "tiny.parquet"
     tiny.write_bytes(b"PAR")  # 3 bytes, well under the 8-byte minimum
-    with caplog.at_level("WARNING", logger=_PARQUET_LOGGER):
+    with caplog.at_level("DEBUG", logger=_PARQUET_LOGGER):
         assert handler.claims(make_source(tiny)) is False
     assert any(
         tiny.name in r.message and "too small" in r.message for r in caplog.records
-    ), f"expected a WARNING naming {tiny} and 'too small', got {caplog.records}"
+    ), f"expected a debug record naming {tiny} and 'too small', got {caplog.records}"
 
 
 def test_can_handle_accepts_real_parquet(
@@ -223,12 +226,15 @@ def test_distinct_names_are_distinct_tables_even_with_one_schema(
             "nucleus_boundaries.parquet", "s1/nucleus_boundaries.parquet", _BOUNDARIES
         ),
     ]
-    filesets, record_sets, conflicts = handler.build_croissant(
-        metas, ["file_0", "file_1"]
+    built = handler.build_croissant(metas, ["file_0", "file_1"])
+    filesets, record_sets, conflicts = (
+        built.file_sets,
+        built.record_sets,
+        built.declined,
     )
 
     assert filesets == []
-    assert conflicts == []
+    assert conflicts == ()
     assert sorted(r.name for r in record_sets) == [
         "cell_boundaries",
         "nucleus_boundaries",
@@ -244,7 +250,8 @@ def test_a_vendor_directory_keeps_every_schema(handler: ParquetHandler) -> None:
             "nucleus_boundaries.parquet", "s1/nucleus_boundaries.parquet", _BOUNDARIES
         ),
     ]
-    _, record_sets, _ = handler.build_croissant(metas, ["f0", "f1", "f2"])
+    built = handler.build_croissant(metas, ["f0", "f1", "f2"])
+    _, record_sets, _ = built.file_sets, built.record_sets, built.declined
 
     by_name = {r.name: [f.name for f in r.fields] for r in record_sets}
     assert set(by_name) == {"cell_boundaries", "cells", "nucleus_boundaries"}
@@ -259,12 +266,14 @@ def test_shards_that_disagree_on_schema_are_reported(handler: ParquetHandler) ->
         _pq_meta("part-00001.parquet", "events/part-00001.parquet", _BOUNDARIES),
         _pq_meta("part-00002.parquet", "events/part-00002.parquet", _CELLS),
     ]
-    _, record_sets, conflicts = handler.build_croissant(metas, ["f0", "f1", "f2"])
+    built = handler.build_croissant(metas, ["f0", "f1", "f2"])
+    _, record_sets, conflicts = built.file_sets, built.record_sets, built.declined
 
     assert len(record_sets) == 1
     assert [f.name for f in record_sets[0].fields] == ["cell_id", "vertex_x"]
 
-    ((index, reason, detail),) = conflicts
+    (refusal,) = conflicts
+    index, reason, detail = refusal.index, refusal.reason, refusal.detail
     assert index == 2
     assert reason is Reason.PARTITION_SCHEMA_CONFLICT
     assert "3 columns, expected 2" in detail
@@ -278,7 +287,8 @@ def test_same_named_directories_do_not_collide(handler: ParquetHandler) -> None:
         _pq_meta("part-00000.parquet", "b/events/part-00000.parquet"),
         _pq_meta("part-00001.parquet", "b/events/part-00001.parquet"),
     ]
-    filesets, record_sets, _ = handler.build_croissant(metas, ["f0", "f1", "f2", "f3"])
+    built = handler.build_croissant(metas, ["f0", "f1", "f2", "f3"])
+    filesets, record_sets, _ = built.file_sets, built.record_sets, built.declined
 
     assert len({f.id for f in filesets}) == 2
     assert len({r.id for r in record_sets}) == 2
@@ -296,7 +306,8 @@ def test_a_shared_directory_names_tables_after_their_files(
         _pq_meta("part-00001.parquet", "events/part-00001.parquet", _BOUNDARIES),
         _pq_meta("lookup.parquet", "events/lookup.parquet", _CELLS),
     ]
-    filesets, record_sets, _ = handler.build_croissant(metas, ["f0", "f1", "f2"])
+    built = handler.build_croissant(metas, ["f0", "f1", "f2"])
+    filesets, record_sets, _ = built.file_sets, built.record_sets, built.declined
 
     assert sorted(r.name for r in record_sets) == ["lookup", "part"]
     # The glob would reach the neighbouring table, so the shards are listed.
@@ -307,17 +318,19 @@ def test_a_shared_directory_names_tables_after_their_files(
 
 
 def test_parquet_build_croissant_standalone(handler: ParquetHandler) -> None:
-    filesets, record_sets, _ = handler.build_croissant(
+    built = handler.build_croissant(
         [_pq_meta("data.parquet", "data.parquet")], ["file_0"]
     )
+    filesets, record_sets, _ = built.file_sets, built.record_sets, built.declined
     assert filesets == []
     assert record_sets[0].name == "data"
 
 
 def test_parquet_build_croissant_single_file_in_subdir(handler: ParquetHandler) -> None:
-    filesets, record_sets, _ = handler.build_croissant(
+    built = handler.build_croissant(
         [_pq_meta("part-00000.parquet", "events/part-00000.parquet")], ["file_0"]
     )
+    filesets, record_sets, _ = built.file_sets, built.record_sets, built.declined
     assert filesets == []
     assert record_sets[0].name == "events"
 
@@ -327,7 +340,8 @@ def test_parquet_build_croissant_partitioned(handler: ParquetHandler) -> None:
         _pq_meta("part-00000.parquet", "events/part-00000.parquet"),
         _pq_meta("part-00001.parquet", "events/part-00001.parquet"),
     ]
-    filesets, record_sets, _ = handler.build_croissant(metas, ["file_0", "file_1"])
+    built = handler.build_croissant(metas, ["file_0", "file_1"])
+    filesets, record_sets, _ = built.file_sets, built.record_sets, built.declined
     assert len(filesets) == 1
     assert len(record_sets) == 1
     assert record_sets[0].name == "events"
@@ -353,7 +367,8 @@ def test_parquet_array_shape_fixed_vs_variable(
 
     meta = handler.extract(make_source(path))
     meta["relative_path"] = "vectors.parquet"
-    _, record_sets, _ = handler.build_croissant([meta], ["file_0"])
+    built = handler.build_croissant([meta], ["file_0"])
+    _, record_sets, _ = built.file_sets, built.record_sets, built.declined
 
     fields = {f.name: f for f in record_sets[0].fields}
     assert fields["embedding"].is_array is True
@@ -371,7 +386,8 @@ def test_a_declined_shard_is_not_left_inside_the_fileset(
         _pq_meta("part-00001.parquet", "events/part-00001.parquet", _BOUNDARIES),
         _pq_meta("part-00002.parquet", "events/part-00002.parquet", _CELLS),
     ]
-    filesets, _, conflicts = handler.build_croissant(metas, ["f0", "f1", "f2"])
+    built = handler.build_croissant(metas, ["f0", "f1", "f2"])
+    filesets, _, conflicts = built.file_sets, built.record_sets, built.declined
 
     assert len(conflicts) == 1
     assert filesets[0].includes == [
@@ -391,10 +407,15 @@ def test_shards_are_grouped_on_the_arrow_schema_not_the_croissant_types(
         meta["arrow_schema"] = pa.schema([pa.field("t", pa.timestamp(unit))])
         metas.append(meta)
 
-    filesets, record_sets, conflicts = handler.build_croissant(metas, ["f0", "f1"])
+    built = handler.build_croissant(metas, ["f0", "f1"])
+    filesets, record_sets, conflicts = (
+        built.file_sets,
+        built.record_sets,
+        built.declined,
+    )
 
     assert filesets == []
-    assert conflicts == []
+    assert conflicts == ()
     assert len({r.id for r in record_sets}) == 2
 
 
@@ -404,10 +425,15 @@ def test_root_level_files_are_never_declined(handler: ParquetHandler) -> None:
         _pq_meta("part-00000.parquet", "part-00000.parquet", _BOUNDARIES),
         _pq_meta("part-00001.parquet", "part-00001.parquet", _CELLS),
     ]
-    filesets, record_sets, conflicts = handler.build_croissant(metas, ["f0", "f1"])
+    built = handler.build_croissant(metas, ["f0", "f1"])
+    filesets, record_sets, conflicts = (
+        built.file_sets,
+        built.record_sets,
+        built.declined,
+    )
 
     assert filesets == []
-    assert conflicts == []
+    assert conflicts == ()
     assert sorted(r.name for r in record_sets) == ["part-00000", "part-00001"]
 
 
@@ -421,7 +447,8 @@ def test_two_templates_reducing_to_one_stem_get_distinct_ids(
         _pq_meta("part_000.parquet", "d/part_000.parquet", _CELLS),
         _pq_meta("part_001.parquet", "d/part_001.parquet", _CELLS),
     ]
-    filesets, record_sets, _ = handler.build_croissant(metas, ["f0", "f1", "f2", "f3"])
+    built = handler.build_croissant(metas, ["f0", "f1", "f2", "f3"])
+    filesets, record_sets, _ = built.file_sets, built.record_sets, built.declined
 
     assert len({f.id for f in filesets}) == 2
     assert len({r.id for r in record_sets}) == 2
@@ -433,10 +460,15 @@ def test_a_number_inside_a_word_is_not_a_shard_index(handler: ParquetHandler) ->
         _pq_meta("assay1.parquet", "d/assay1.parquet", _BOUNDARIES),
         _pq_meta("assay2.parquet", "d/assay2.parquet", _BOUNDARIES),
     ]
-    filesets, record_sets, conflicts = handler.build_croissant(metas, ["f0", "f1"])
+    built = handler.build_croissant(metas, ["f0", "f1"])
+    filesets, record_sets, conflicts = (
+        built.file_sets,
+        built.record_sets,
+        built.declined,
+    )
 
     assert filesets == []
-    assert conflicts == []
+    assert conflicts == ()
     assert sorted(r.name for r in record_sets) == ["assay1", "assay2"]
 
 
@@ -446,7 +478,89 @@ def test_differing_years_are_not_merged_or_declined(handler: ParquetHandler) -> 
         _pq_meta("report2024.parquet", "d/report2024.parquet", _BOUNDARIES),
         _pq_meta("report2025.parquet", "d/report2025.parquet", _CELLS),
     ]
-    _, record_sets, conflicts = handler.build_croissant(metas, ["f0", "f1"])
+    built = handler.build_croissant(metas, ["f0", "f1"])
+    _, record_sets, conflicts = built.file_sets, built.record_sets, built.declined
 
-    assert conflicts == []
+    assert conflicts == ()
     assert sorted(r.name for r in record_sets) == ["report2024", "report2025"]
+
+
+# --- A tie is not a majority ------------------------------------------------
+
+
+def test_a_schema_tie_declines_nothing_and_describes_both_groups(
+    handler: ParquetHandler,
+) -> None:
+    """Two-versus-two is no majority, so neither half may be thrown away."""
+    metas = [
+        _pq_meta("part-000.parquet", "t/part-000.parquet", _CELLS),
+        _pq_meta("part-001.parquet", "t/part-001.parquet", _CELLS),
+        _pq_meta("part-002.parquet", "t/part-002.parquet", _BOUNDARIES),
+        _pq_meta("part-003.parquet", "t/part-003.parquet", _BOUNDARIES),
+    ]
+    built = handler.build_croissant(metas, [f"f{i}" for i in range(4)])
+
+    assert built.declined == ()
+    assert len(built.record_sets) == 2
+
+
+def test_a_real_majority_still_declines_the_minority(handler: ParquetHandler) -> None:
+    """Three-versus-one keeps the behaviour a tie must not have."""
+    metas = [
+        _pq_meta(f"part-00{i}.parquet", f"t/part-00{i}.parquet", _CELLS)
+        for i in range(3)
+    ] + [_pq_meta("part-003.parquet", "t/part-003.parquet", _BOUNDARIES)]
+    built = handler.build_croissant(metas, [f"f{i}" for i in range(4)])
+
+    assert [d.index for d in built.declined] == [3]
+
+
+# --- Schema identity is Arrow's, not a rendered string ----------------------
+
+
+def test_field_metadata_does_not_split_a_table(handler: ParquetHandler) -> None:
+    """Arrow considers these schemas equal; grouping must agree with Arrow."""
+    plain = pa.schema([pa.field("id", pa.int64()), pa.field("v", pa.float64())])
+    annotated = pa.schema(
+        [
+            pa.field("id", pa.int64(), metadata={b"note": b"written by shard 1"}),
+            pa.field("v", pa.float64()),
+        ]
+    )
+    assert plain.equals(annotated)
+
+    metas = []
+    for i, schema in enumerate((plain, annotated)):
+        meta = _pq_meta(f"part-00{i}.parquet", f"t/part-00{i}.parquet")
+        meta["arrow_schema"] = schema
+        metas.append(meta)
+
+    built = handler.build_croissant(metas, ["f0", "f1"])
+
+    assert built.declined == ()
+    assert len(built.record_sets) == 1
+    assert len(built.file_sets) == 1
+
+
+# --- Identifiers are unique across node kinds, not just within one ----------
+
+
+def test_a_derived_fileset_id_cannot_collide_with_a_record_set(tmp_path: Path) -> None:
+    """``foo`` partitioned yields FileSet ``foo-fileset``; a standalone file
+    actually named ``foo-fileset`` yields a RecordSet of the same id."""
+    from croissant_baker.metadata_generator import MetadataGenerator
+
+    table = pa.table({"id": pa.array([1, 2]), "v": pa.array(["a", "b"])})
+    (tmp_path / "foo").mkdir()
+    for i in range(2):
+        pq.write_table(table, str(tmp_path / "foo" / f"part-00{i}.parquet"))
+    pq.write_table(table, str(tmp_path / "foo-fileset.parquet"))
+
+    document = MetadataGenerator(
+        dataset_path=str(tmp_path), name="c"
+    ).generate_metadata()
+
+    ids = [n["@id"] for n in document["distribution"]] + [
+        r["@id"] for r in document["recordSet"]
+    ]
+    assert len(ids) == len(set(ids)), sorted(ids)

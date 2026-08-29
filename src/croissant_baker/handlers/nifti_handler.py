@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 import mlcroissant as mlc
 import nibabel as nib
 
-from croissant_baker.handlers.base_handler import FileTypeHandler
+from croissant_baker.handlers.base_handler import BuildResult, FileTypeHandler
 from croissant_baker.sources import FileSource
 
 logger = logging.getLogger(__name__)
@@ -129,6 +129,11 @@ class NIfTIHandler(FileTypeHandler):
     def build_croissant(
         self, file_metas: list[dict], file_ids: list[str]
     ) -> tuple[list, list]:
+        # An empty batch has nothing to summarise; emitting a FileSet over
+        # zero files would describe data that is not there.
+        if not file_metas:
+            return BuildResult([], [])
+
         summary = collect_nifti_summary(file_metas)
 
         num_files = summary.get("num_files", len(file_metas))
@@ -256,7 +261,7 @@ class NIfTIHandler(FileTypeHandler):
             fields=fields,
         )
 
-        return [nifti_fileset], [nifti_record_set]
+        return BuildResult([nifti_fileset], [nifti_record_set])
 
 
 def collect_nifti_summary(nifti_metadata_list: List[Dict]) -> Dict:

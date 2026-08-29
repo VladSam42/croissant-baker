@@ -6,7 +6,7 @@ Nothing is skipped in silence. Each file that goes undescribed is named on the l
 
 ```text
 Scanned 8 file(s): 5 described, 3 not described.
-  no registered handler: 1
+  no handler: 1
   archive, not opened: 1
   duplicate by naming convention: 1
 ```
@@ -22,7 +22,7 @@ fixed vocabularies, so a tool can branch on them without parsing English:
   "by_reason": {"no_handler": 1, "archive": 1, "duplicate_by_name": 1},
   "files": [
     {"path": "notes.txt", "outcome": "unclaimed", "reason": "no_handler",
-     "detail": "no registered handler claims this file"},
+     "detail": "no handler for this file type"},
     {"path": "sample.csv.gz", "outcome": "linked", "reason": "duplicate_by_name",
      "detail": "same logical name as sample.csv; linked by naming convention, content not verified",
      "duplicate_of": "sample.csv"}

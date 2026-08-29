@@ -13,13 +13,24 @@ from typing import Dict, List, Optional
 
 import mlcroissant as mlc
 
+from croissant_baker.assembly import (
+    _encoding_formats,
+    _resolve_file_sets,
+    _wrappers_in,
+)
+from croissant_baker.identifiers import (
+    _assert_unique_node_ids,
+    _disambiguate_record_sets,
+    serialize_datetime,
+)
+
 from croissant_baker import compression
+from croissant_baker.handlers.base_handler import BuildResult
 from croissant_baker.handlers.registry import (
     HandlerRegistry,
     default_registry,
     extract as extract_with,
 )
-from croissant_baker.handlers.utils import sanitize_id
 from croissant_baker.scan import (
     Outcome,
     Reason,
@@ -39,197 +50,6 @@ logger = logging.getLogger(__name__)
 # https://docs.mlcommons.org/croissant/docs/croissant-spec-1.1.html
 CROISSANT_CONFORMS_TO = "http://mlcommons.org/croissant/1.1"
 RAI_CONFORMS_TO = "http://mlcommons.org/croissant/RAI/1.0"
-
-
-def _encoding_formats(format_media_type: str, relative_path: str) -> List[str]:
-    """The media types describing one file: its format, then its wrapper.
-
-    A gzipped CSV is ``["text/csv", "application/gzip"]``. Croissant 1.1 gives
-    ``sc:encodingFormat`` cardinality MANY, and this shape is proposal 2 of
-    mlcommons/croissant#635, which is still open on how single-file compression
-    should be expressed. The alternatives are worse: ``+``-concatenation
-    (proposal 1) produces a string no consumer matches, and ``containedIn`` is
-    the spec's mechanism for archives, whose extraction mlcroissant gates on
-    tar/zip.
-
-    Order matters. mlcroissant decides to decompress from the filename suffix,
-    not from this list, and re-applies it on each iteration until a media type
-    it recognises returns — so the format must come first. Reversed, a ``.gz``
-    file is gunzipped twice.
-
-    Handlers report only the format; the wrapper is the pipeline's to know.
-    """
-    wrapper = compression.compression_for(Path(relative_path).name)
-    if wrapper is None:
-        return [format_media_type]
-    return [format_media_type, wrapper.media_type]
-
-
-#: Characters that make an ``includes`` entry a pattern rather than a filename.
-_GLOB_CHARS = ("*", "?", "[")
-
-
-def _wrappers_in(entries: list) -> List:
-    """The compressions among ``entries``, in registry order.
-
-    Called per handler batch, so a FileSet declares only the wrappers its own
-    files use. Registry order rather than set order keeps the output stable.
-    """
-    present = {
-        comp.suffix
-        for entry in entries
-        if (comp := compression.compression_for(entry.path.name))
-    }
-    return [c for c in compression.compressions() if c.suffix in present]
-
-
-def _resolve_file_sets(file_sets: list, stored_paths: dict, wrappers: list) -> list:
-    """Point each FileSet at the files as stored, and at the wrappers they use.
-
-    A handler names its files logically; only the generator knows what is on
-    disk. An exact name becomes the stored path or paths it stands for, and a
-    pattern gains one variant per compression present. Expanding an exact name
-    as if it were a pattern would append a second suffix.
-
-    Args:
-        file_sets: FileSets from one handler batch. Mutated in place.
-        stored_paths: Logical dataset-relative path to the stored paths sharing
-            it. A plain file and its wrapper share one logical key.
-        wrappers: Compressions present in this batch, in registry order.
-
-    Returns:
-        ``file_sets``, for chaining.
-    """
-    wrapper_types = [c.media_type for c in wrappers]
-    for file_set in file_sets:
-        formats = list(file_set.encoding_formats or [])
-        file_set.encoding_formats = formats + [
-            t for t in wrapper_types if t not in formats
-        ]
-
-        includes = getattr(file_set, "includes", None)
-        if not includes:
-            continue
-        resolved: List[str] = []
-        for pattern in includes:
-            if any(char in pattern for char in _GLOB_CHARS):
-                resolved.extend(compression.expand_globs([pattern], wrappers))
-            else:
-                # An exact name the scan did not find would be a phantom entry.
-                resolved.extend(stored_paths.get(pattern, ()))
-        file_set.includes = list(dict.fromkeys(resolved))
-    return file_sets
-
-
-def _handler_label(handler) -> str:
-    """A short, stable discriminator for a handler, for identifier collisions."""
-    name = type(handler).__name__
-    if name.endswith("Handler"):
-        name = name[: -len("Handler")]
-    return sanitize_id(name).lower() or "handler"
-
-
-def _rename_record_set(record_set, new_id: str) -> None:
-    """Point a record set and every field beneath it at a new identifier.
-
-    Field identifiers are ``{record_set}/{column}``, and sub-fields extend that
-    with another segment, so every identifier in the subtree carries the record
-    set's own as a prefix. Only the prefix moves; the column names, which are
-    what a reader matches on, are untouched.
-    """
-    old_prefix = f"{record_set.id}/"
-    record_set.id = new_id
-
-    def rewrite(fields) -> None:
-        for f in fields or []:
-            if f.id and f.id.startswith(old_prefix):
-                f.id = f"{new_id}/{f.id[len(old_prefix) :]}"
-            rewrite(getattr(f, "sub_fields", None))
-
-    rewrite(record_set.fields)
-
-
-def _disambiguate_record_sets(batches: list) -> list:
-    """Give same-stem record sets from different handlers distinct identifiers.
-
-    ``sample.csv`` and ``sample.tsv`` both shorten to the stem ``sample``, and
-    each handler names identifiers within its own batch, so the collision is
-    only visible once every batch has been built. Every member of a colliding
-    group is suffixed, so the outcome does not depend on which handler ran
-    first: ``sample_csv`` and ``sample_tsv``, never ``sample`` and
-    ``sample_tsv``.
-
-    Args:
-        batches: ``(handler, record_sets)`` pairs, one per handler that
-            contributed. Colliding record sets are renamed in place.
-
-    Returns:
-        Every record set, in batch order.
-    """
-    by_id: dict = defaultdict(list)
-    for handler, record_sets in batches:
-        for record_set in record_sets:
-            by_id[record_set.id].append((handler, record_set))
-
-    taken = {rs_id for rs_id, members in by_id.items() if len(members) == 1}
-    for rs_id, members in by_id.items():
-        if len(members) == 1:
-            continue
-        for handler, record_set in members:
-            candidate = f"{rs_id}_{_handler_label(handler)}"
-            # A file actually named sample_csv could already hold it.
-            if candidate in taken:
-                n = 2
-                while f"{candidate}__{n}" in taken:
-                    n += 1
-                candidate = f"{candidate}__{n}"
-            taken.add(candidate)
-            _rename_record_set(record_set, candidate)
-
-    return [rs for _, record_sets in batches for rs in record_sets]
-
-
-def serialize_datetime(obj):
-    """Convert datetime objects to ISO format strings for JSON serialization."""
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-
-
-def _assert_unique_node_ids(distributions: list, record_sets: list) -> None:
-    """Verify every emitted @id is unique across the document.
-
-    JSON-LD merges nodes that share an @id (`json-ld11/#node-identifiers`
-    spec section: nodes with the same identifier represent the same node).
-    A collision therefore silently merges nodes, producing incorrect
-    Croissant output. Surfacing the conflict here keeps the failure
-    local to the generator with the offending @id and node types
-    attached, instead of leaking out as an opaque downstream validation
-    error or, worse, passing validation while silently dropping data.
-    """
-    seen: dict = {}
-
-    def _claim(node_id, kind: str) -> None:
-        if node_id is None:
-            return
-        if node_id in seen:
-            raise ValueError(
-                f"Croissant @id collision: '{node_id}' is used by both "
-                f"{seen[node_id]} and {kind}. Every FileObject, FileSet, "
-                f"RecordSet, and Field must carry a unique @id."
-            )
-        seen[node_id] = kind
-
-    def _walk_fields(fields) -> None:
-        for f in fields or []:
-            _claim(getattr(f, "id", None), "Field")
-            _walk_fields(getattr(f, "sub_fields", None))
-
-    for d in distributions:
-        _claim(getattr(d, "id", None), type(d).__name__)
-    for r in record_sets:
-        _claim(getattr(r, "id", None), "RecordSet")
-        _walk_fields(getattr(r, "fields", None))
 
 
 def _apply_field_mappings(
@@ -571,15 +391,13 @@ class MetadataGenerator:
         for handler, batch in by_handler.items():
             pairs = [(staged[e][0].id, e.meta) for e in batch]
             try:
-                built = handler.build_croissant(
-                    [m for _, m in pairs],
-                    [fid for fid, _ in pairs],
-                )
-                # A handler may decline individual files rather than the batch;
-                # older ones return two values and decline nothing. Unpacked
-                # under the guard, so a malformed return costs this batch only.
-                handler_file_sets, record_sets, declined = (
-                    built if len(built) == 3 else (*built, ())
+                # Coerced under the guard: a handler is third-party code, and
+                # a malformed return must cost its own batch, not the run.
+                built = BuildResult.coerce(
+                    handler.build_croissant(
+                        [m for _, m in pairs],
+                        [fid for fid, _ in pairs],
+                    )
                 )
             except Exception as e:  # noqa: BLE001 — one batch, not the bake
                 logger.warning(
@@ -591,21 +409,19 @@ class MetadataGenerator:
                 continue
 
             rejected = set()
-            for index, reason, detail in declined:
-                entry = batch[index]
+            for refusal in built.declined:
+                entry = batch[refusal.index]
                 rejected.add(entry)
                 staged.pop(entry, None)
-                entry.failed(reason, ValueError(detail))
+                entry.failed(refusal.reason, ValueError(refusal.detail))
                 self._warn_undescribed(entry)
 
             described = [e for e in batch if e not in rejected]
             covered = [e for entry in described for e in (entry, *dependants[entry])]
             file_sets.extend(
-                _resolve_file_sets(
-                    handler_file_sets, stored_paths, _wrappers_in(covered)
-                )
+                _resolve_file_sets(built.file_sets, stored_paths, _wrappers_in(covered))
             )
-            batches.append((handler, record_sets))
+            batches.append((handler, built.record_sets))
             for entry in described:
                 entry.describe()
 
@@ -965,3 +781,6 @@ class MetadataGenerator:
                 default=serialize_datetime,
             )
             f.write("\n")
+
+
+__all__ = ["MetadataGenerator", "serialize_datetime", "MAX_UNDESCRIBED_WARNINGS"]

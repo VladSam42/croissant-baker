@@ -236,7 +236,7 @@ def test_a_compressed_wfdb_header_is_refused_with_its_own_reason(
     assert selection.handler is None
     assert "gzip" in selection.refusal
     assert "on disk" in selection.refusal
-    assert selection.refusal != "no registered handler claims this file"
+    assert selection.refusal != "no handler for this file type"
 
 
 def test_a_plain_wfdb_header_is_still_claimed(tmp_path: Path) -> None:
