@@ -75,6 +75,8 @@ class Reason(str, Enum):
     DUPLICATE_BY_NAME = "duplicate_by_name"
     #: Two candidates decompressed to the same bounded prefix.
     PROBABLE_DUPLICATE = "probable_duplicate"
+    #: Named like a partition of a table whose other shards disagree on schema.
+    PARTITION_SCHEMA_CONFLICT = "partition_schema_conflict"
 
 
 #: One short label per reason, for the fixed-size terminal summary.
@@ -87,6 +89,7 @@ REASON_LABELS: Dict[Reason, str] = {
     Reason.BUILD_FAILED: "could not be assembled",
     Reason.DUPLICATE_BY_NAME: "duplicate by naming convention",
     Reason.PROBABLE_DUPLICATE: "probable duplicate of another file",
+    Reason.PARTITION_SCHEMA_CONFLICT: "partition schema conflict",
 }
 
 

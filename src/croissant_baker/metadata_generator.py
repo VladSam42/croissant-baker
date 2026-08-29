@@ -43,9 +43,20 @@ RAI_CONFORMS_TO = "http://mlcommons.org/croissant/RAI/1.0"
 def _encoding_formats(format_media_type: str, relative_path: str) -> List[str]:
     """The media types describing one file: its format, then its wrapper.
 
-    Croissant takes a list, so a gzipped CSV is
-    ``["text/csv", "application/gzip"]``. Handlers report only the format; the
-    wrapper is the pipeline's to know.
+    A gzipped CSV is ``["text/csv", "application/gzip"]``. Croissant 1.1 gives
+    ``sc:encodingFormat`` cardinality MANY, and this shape is proposal 2 of
+    mlcommons/croissant#635, which is still open on how single-file compression
+    should be expressed. The alternatives are worse: ``+``-concatenation
+    (proposal 1) produces a string no consumer matches, and ``containedIn`` is
+    the spec's mechanism for archives, whose extraction mlcroissant gates on
+    tar/zip.
+
+    Order matters. mlcroissant decides to decompress from the filename suffix,
+    not from this list, and re-applies it on each iteration until a media type
+    it recognises returns — so the format must come first. Reversed, a ``.gz``
+    file is gunzipped twice.
+
+    Handlers report only the format; the wrapper is the pipeline's to know.
     """
     wrapper = compression.compression_for(Path(relative_path).name)
     if wrapper is None:
@@ -284,6 +295,11 @@ def _apply_field_mappings(
                 count,
                 name,
             )
+
+
+def _warn_undescribed(entry: ScanEntry) -> None:
+    """Report a file as it is passed over, not only in the closing summary."""
+    logger.warning("%s: %s", entry.path, entry.detail)
 
 
 class MetadataGenerator:
@@ -549,7 +565,7 @@ class MetadataGenerator:
         for handler, batch in by_handler.items():
             pairs = [(staged[e][0].id, e.meta) for e in batch]
             try:
-                handler_file_sets, record_sets = handler.build_croissant(
+                built = handler.build_croissant(
                     [m for _, m in pairs],
                     [fid for fid, _ in pairs],
                 )
@@ -560,14 +576,29 @@ class MetadataGenerator:
                 for entry in batch:
                     entry.failed(Reason.BUILD_FAILED, e)
                 continue
-            covered = [e for entry in batch for e in (entry, *dependants[entry])]
+
+            # A handler may decline individual files rather than the batch;
+            # older ones return two values and decline nothing.
+            handler_file_sets, record_sets, declined = (
+                built if len(built) == 3 else (*built, ())
+            )
+            rejected = set()
+            for index, reason, detail in declined:
+                entry = batch[index]
+                rejected.add(entry)
+                staged.pop(entry, None)
+                entry.failed(reason, ValueError(detail))
+                _warn_undescribed(entry)
+
+            described = [e for e in batch if e not in rejected]
+            covered = [e for entry in described for e in (entry, *dependants[entry])]
             file_sets.extend(
                 _resolve_file_sets(
                     handler_file_sets, stored_paths, _wrappers_in(covered)
                 )
             )
             batches.append((handler, record_sets))
-            for entry in batch:
+            for entry in described:
                 entry.describe()
 
         # A duplicate stands on its primary's description. Where there is none,
@@ -694,10 +725,12 @@ class MetadataGenerator:
             selection = self.handlers.select(full_path, entry.path)
         except Exception as e:  # noqa: BLE001 — one file, not the bake
             entry.failed(Reason.CLAIM_FAILED, e)
+            _warn_undescribed(entry)
             return
 
         if selection.handler is None:
             entry.unclaimed(selection.reason or Reason.NO_HANDLER, selection.refusal)
+            _warn_undescribed(entry)
             return
 
         handler, source = selection.handler, selection.source
@@ -710,6 +743,7 @@ class MetadataGenerator:
             entry.ready(handler, meta)
         except Exception as e:  # noqa: BLE001 — recorded, then reported
             entry.failed(Reason.EXTRACT_FAILED, e)
+            _warn_undescribed(entry)
 
     def _file_objects_for(self, entry: ScanEntry, counter: int) -> tuple[list, int]:
         """Build the distribution entries for one file, and the next free id.

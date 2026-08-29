@@ -155,6 +155,19 @@ def make_record_set_ids(file_metas: list) -> list:
     return _disambiguate_ids(items)
 
 
+DIGIT_MASK = "<N>"
+_DIGIT_RUN = re.compile(r"\d+")
+
+
+def partition_template(file_name: str) -> str:
+    """The basename with digit runs masked, so shards of one table share a key.
+
+    Only a numeric index varies between shards; Spark's job uuid is constant
+    across the files one write produces.
+    """
+    return _DIGIT_RUN.sub(DIGIT_MASK, file_name)
+
+
 def make_partition_record_set_ids(dir_paths: list) -> list:
     """Return a unique RecordSet @id for each partitioned-table directory.
 

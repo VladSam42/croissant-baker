@@ -201,8 +201,8 @@ def test_a_glob_stays_scoped_to_the_directory_it_describes(dataset: Path) -> Non
     ((_, payload),) = SAMPLES["ParquetHandler"]()
     part = dataset / "part"
     part.mkdir()
-    write_wrapped(part, "a.parquet", payload)
-    write_wrapped(part, "b.parquet", payload, ".gz")
+    write_wrapped(part, "part-00000.parquet", payload)
+    write_wrapped(part, "part-00001.parquet", payload, ".gz")
 
     assert includes(file_sets(bake(dataset))[0]) == [
         "part/*.parquet",

@@ -7,6 +7,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from croissant_baker.scan import Reason
 from croissant_baker.handlers.parquet_handler import ParquetHandler
 from croissant_baker.sources import make_source
 
@@ -206,8 +207,107 @@ def _pq_meta(name, rel_path, cols=None):
     }
 
 
+# --- Grouping is on evidence, not on directory membership -------------------
+
+_BOUNDARIES = {"cell_id": "sc:Text", "vertex_x": "cr:Float32"}
+_CELLS = {"cell_id": "sc:Text", "x_centroid": "cr:Float32", "counts": "cr:Int32"}
+
+
+def test_distinct_names_are_distinct_tables_even_with_one_schema(
+    handler: ParquetHandler,
+) -> None:
+    """Two 10x boundary tables share a schema but are not partitions of each other."""
+    metas = [
+        _pq_meta("cell_boundaries.parquet", "s1/cell_boundaries.parquet", _BOUNDARIES),
+        _pq_meta(
+            "nucleus_boundaries.parquet", "s1/nucleus_boundaries.parquet", _BOUNDARIES
+        ),
+    ]
+    filesets, record_sets, conflicts = handler.build_croissant(
+        metas, ["file_0", "file_1"]
+    )
+
+    assert filesets == []
+    assert conflicts == []
+    assert sorted(r.name for r in record_sets) == [
+        "cell_boundaries",
+        "nucleus_boundaries",
+    ]
+
+
+def test_a_vendor_directory_keeps_every_schema(handler: ParquetHandler) -> None:
+    """Four tables in one sample directory stay four, with their own columns."""
+    metas = [
+        _pq_meta("cell_boundaries.parquet", "s1/cell_boundaries.parquet", _BOUNDARIES),
+        _pq_meta("cells.parquet", "s1/cells.parquet", _CELLS),
+        _pq_meta(
+            "nucleus_boundaries.parquet", "s1/nucleus_boundaries.parquet", _BOUNDARIES
+        ),
+    ]
+    _, record_sets, _ = handler.build_croissant(metas, ["f0", "f1", "f2"])
+
+    by_name = {r.name: [f.name for f in r.fields] for r in record_sets}
+    assert set(by_name) == {"cell_boundaries", "cells", "nucleus_boundaries"}
+    assert by_name["cells"] == ["cell_id", "x_centroid", "counts"]
+    assert by_name["cell_boundaries"] == ["cell_id", "vertex_x"]
+
+
+def test_shards_that_disagree_on_schema_are_reported(handler: ParquetHandler) -> None:
+    """Drift inside one partitioned table is declined, not folded into the first schema."""
+    metas = [
+        _pq_meta("part-00000.parquet", "events/part-00000.parquet", _BOUNDARIES),
+        _pq_meta("part-00001.parquet", "events/part-00001.parquet", _BOUNDARIES),
+        _pq_meta("part-00002.parquet", "events/part-00002.parquet", _CELLS),
+    ]
+    _, record_sets, conflicts = handler.build_croissant(metas, ["f0", "f1", "f2"])
+
+    assert len(record_sets) == 1
+    assert [f.name for f in record_sets[0].fields] == ["cell_id", "vertex_x"]
+
+    ((index, reason, detail),) = conflicts
+    assert index == 2
+    assert reason is Reason.PARTITION_SCHEMA_CONFLICT
+    assert "3 columns, expected 2" in detail
+
+
+def test_same_named_directories_do_not_collide(handler: ParquetHandler) -> None:
+    """Hive layouts repeat a directory name under different parents."""
+    metas = [
+        _pq_meta("part-00000.parquet", "a/events/part-00000.parquet"),
+        _pq_meta("part-00001.parquet", "a/events/part-00001.parquet"),
+        _pq_meta("part-00000.parquet", "b/events/part-00000.parquet"),
+        _pq_meta("part-00001.parquet", "b/events/part-00001.parquet"),
+    ]
+    filesets, record_sets, _ = handler.build_croissant(metas, ["f0", "f1", "f2", "f3"])
+
+    assert len({f.id for f in filesets}) == 2
+    assert len({r.id for r in record_sets}) == 2
+    # Each record set's fields must reach its own FileSet, not the first one.
+    for record_set, fileset in zip(record_sets, filesets):
+        assert record_set.fields[0].source.file_set == fileset.id
+
+
+def test_a_shared_directory_names_tables_after_their_files(
+    handler: ParquetHandler,
+) -> None:
+    """The parent directory only names a table while it is the directory's only one."""
+    metas = [
+        _pq_meta("part-00000.parquet", "events/part-00000.parquet", _BOUNDARIES),
+        _pq_meta("part-00001.parquet", "events/part-00001.parquet", _BOUNDARIES),
+        _pq_meta("lookup.parquet", "events/lookup.parquet", _CELLS),
+    ]
+    filesets, record_sets, _ = handler.build_croissant(metas, ["f0", "f1", "f2"])
+
+    assert sorted(r.name for r in record_sets) == ["lookup", "part"]
+    # The glob would reach the neighbouring table, so the shards are listed.
+    assert filesets[0].includes == [
+        "events/part-00000.parquet",
+        "events/part-00001.parquet",
+    ]
+
+
 def test_parquet_build_croissant_standalone(handler: ParquetHandler) -> None:
-    filesets, record_sets = handler.build_croissant(
+    filesets, record_sets, _ = handler.build_croissant(
         [_pq_meta("data.parquet", "data.parquet")], ["file_0"]
     )
     assert filesets == []
@@ -215,7 +315,7 @@ def test_parquet_build_croissant_standalone(handler: ParquetHandler) -> None:
 
 
 def test_parquet_build_croissant_single_file_in_subdir(handler: ParquetHandler) -> None:
-    filesets, record_sets = handler.build_croissant(
+    filesets, record_sets, _ = handler.build_croissant(
         [_pq_meta("part-00000.parquet", "events/part-00000.parquet")], ["file_0"]
     )
     assert filesets == []
@@ -227,7 +327,7 @@ def test_parquet_build_croissant_partitioned(handler: ParquetHandler) -> None:
         _pq_meta("part-00000.parquet", "events/part-00000.parquet"),
         _pq_meta("part-00001.parquet", "events/part-00001.parquet"),
     ]
-    filesets, record_sets = handler.build_croissant(metas, ["file_0", "file_1"])
+    filesets, record_sets, _ = handler.build_croissant(metas, ["file_0", "file_1"])
     assert len(filesets) == 1
     assert len(record_sets) == 1
     assert record_sets[0].name == "events"
@@ -253,7 +353,7 @@ def test_parquet_array_shape_fixed_vs_variable(
 
     meta = handler.extract(make_source(path))
     meta["relative_path"] = "vectors.parquet"
-    _, record_sets = handler.build_croissant([meta], ["file_0"])
+    _, record_sets, _ = handler.build_croissant([meta], ["file_0"])
 
     fields = {f.name: f for f in record_sets[0].fields}
     assert fields["embedding"].is_array is True

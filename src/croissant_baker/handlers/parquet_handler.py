@@ -2,12 +2,15 @@
 
 import logging
 from collections import defaultdict
+from dataclasses import dataclass
+from typing import NamedTuple
 from pathlib import Path
 
 import mlcroissant as mlc
 from pyarrow.parquet import ParquetFile
 
 from croissant_baker.handlers.base_handler import FileTypeHandler
+from croissant_baker.scan import Reason
 from croissant_baker.sources import FileSource
 from croissant_baker.handlers.utils import (
     _build_fields,
@@ -16,7 +19,8 @@ from croissant_baker.handlers.utils import (
     get_clean_record_name,
     infer_column_types_from_arrow_schema,
     make_field_id,
-    make_partition_record_set_ids,
+    DIGIT_MASK,
+    partition_template,
     sanitize_id,
 )
 
@@ -85,6 +89,143 @@ def _has_parquet_magic(source: FileSource) -> bool:
         return False
 
 
+class _File(NamedTuple):
+    index: int
+    file_id: str
+    meta: dict
+
+
+@dataclass(frozen=True)
+class _Table:
+    """One logical table: the shards of a partition, or a standalone file."""
+
+    dir_path: str
+    files: list
+    name: str
+    stem: str
+    disambig_parents: list
+    is_partitioned: bool
+    alone_in_dir: bool
+
+    @property
+    def first_meta(self) -> dict:
+        return self.files[0].meta
+
+
+def _schema_of(meta: dict) -> tuple:
+    return tuple(meta["column_types"].items())
+
+
+def _group_tables(file_metas: list, file_ids: list) -> tuple:
+    """Split Parquet files into logical tables, and the shards that would not fit.
+
+    Spark and Arrow write one table as a directory of ``part-*.parquet``; a
+    vendor output directory holds several unrelated ones. Directory membership
+    cannot tell those apart, so files group on evidence instead: the same
+    schema, and the same name once digit runs are masked.
+    """
+    by_dir: dict = defaultdict(list)
+    for index, (file_id, meta) in enumerate(zip(file_ids, file_metas)):
+        by_dir[str(Path(meta["relative_path"]).parent)].append(
+            _File(index, file_id, meta)
+        )
+
+    tables: list = []
+    conflicts: list = []
+    for dir_path in sorted(by_dir):
+        dir_tables, dir_conflicts = _tables_in_dir(dir_path, by_dir[dir_path])
+        tables.extend(dir_tables)
+        conflicts.extend(dir_conflicts)
+    return tables, conflicts
+
+
+def _tables_in_dir(dir_path: str, files: list) -> tuple:
+    """The tables one directory holds, and the shards it had to decline."""
+    by_template: dict = defaultdict(list)
+    for file in sorted(files, key=lambda f: str(f.meta["relative_path"])):
+        by_template[partition_template(file.meta["file_name"])].append(file)
+
+    groups: list = []
+    conflicts: list = []
+    for template in sorted(by_template):
+        by_schema: dict = defaultdict(list)
+        for file in by_template[template]:
+            by_schema[_schema_of(file.meta)].append(file)
+
+        if len(by_schema) > 1:
+            kept, declined = _resolve_schema_conflict(by_schema)
+            conflicts.extend(_describe_conflicts(kept, declined))
+            shard_groups = [kept]
+        else:
+            shard_groups = list(by_schema.values())
+
+        for shards in shard_groups:
+            # The dataset root is not a table, so its own files never pair.
+            if len(shards) >= 2 and dir_path != ".":
+                groups.append((shards, True))
+            else:
+                groups.extend(([file], False) for file in shards)
+
+    alone = len(groups) == 1
+    return [_make_table(dir_path, g, p, alone) for g, p in groups], conflicts
+
+
+def _resolve_schema_conflict(by_schema: dict) -> tuple:
+    """The largest shard group wins; the rest are declined rather than merged."""
+    ordered = sorted(
+        by_schema.values(),
+        key=lambda g: (-len(g), min(str(f.meta["relative_path"]) for f in g)),
+    )
+    return ordered[0], [file for group in ordered[1:] for file in group]
+
+
+def _describe_conflicts(kept: list, declined: list) -> list:
+    expected = len(kept[0].meta["column_types"])
+    reference = kept[0].meta["file_name"]
+    return [
+        (
+            file.index,
+            Reason.PARTITION_SCHEMA_CONFLICT,
+            f"{len(file.meta['column_types'])} columns, "
+            f"expected {expected} from {reference}",
+        )
+        for file in declined
+    ]
+
+
+def _make_table(dir_path: str, files: list, partitioned: bool, alone: bool) -> _Table:
+    meta = files[0].meta
+    parents = list(Path(meta["relative_path"]).parts[:-1])
+
+    # Parquet basenames are usually partition labels, so a directory holding one
+    # table names it better than its own files do. Once it holds several, the
+    # basenames are what tell them apart.
+    if alone and parents:
+        name, disambig_parents = parents[-1], parents[:-1]
+    elif partitioned:
+        name, disambig_parents = _shared_stem(meta["file_name"]), parents
+    else:
+        name, disambig_parents = get_clean_record_name(meta["file_name"]), parents
+
+    return _Table(
+        dir_path=dir_path,
+        files=files,
+        name=name,
+        stem=sanitize_id(name),
+        disambig_parents=disambig_parents,
+        is_partitioned=partitioned,
+        alone_in_dir=alone,
+    )
+
+
+def _shared_stem(file_name: str) -> str:
+    """What a table's shards have in common, so two do not become ``part-00000``."""
+    common = get_clean_record_name(partition_template(file_name))
+    return common.replace(DIGIT_MASK, "").rstrip("-_.") or get_clean_record_name(
+        file_name
+    )
+
+
 class ParquetHandler(FileTypeHandler):
     """
     Handler for Parquet files (.parquet) with schema-based type inference.
@@ -137,158 +278,90 @@ class ParquetHandler(FileTypeHandler):
     def build_croissant(self, file_metas: list, file_ids: list) -> tuple:
         """Build FileSets and RecordSets for all Parquet files in this dataset.
 
-        Groups files by parent directory. Directories with >=2 files become
-        partitioned tables (one FileSet + one RecordSet). All other files get
-        per-file RecordSets. Root-level files (parent == ".") are never grouped.
+        Returns ``(file_sets, record_sets, conflicts)``, the last being
+        ``(index, Reason, detail)`` per file this declined to describe.
         """
-        additional_distributions = []
+        tables, conflicts = _group_tables(file_metas, file_ids)
+        rs_ids = _disambiguate_ids([(t.stem, t.disambig_parents) for t in tables])
+
+        file_sets = []
         record_sets = []
+        for table, rs_id in zip(tables, rs_ids):
+            if table.is_partitioned:
+                file_sets.append(self._partition_file_set(table, rs_id))
+                record_sets.append(self._partition_record_set(table, rs_id))
+            else:
+                record_sets.append(self._standalone_record_set(table, rs_id))
 
-        # Group by parent directory to detect partitioned tables.
-        # A non-root directory with >=2 .parquet files is treated as one logical
-        # table: one FileSet + one RecordSet (schema taken from first partition).
-        # Root-level files (parent == ".") and single-file directories are
-        # always standalone — one RecordSet per file.
-        dir_groups: dict = defaultdict(list)
-        for file_id, file_meta in zip(file_ids, file_metas):
-            parent = str(Path(file_meta["relative_path"]).parent)
-            dir_groups[parent].append((file_id, file_meta))
+        return file_sets, record_sets, conflicts
 
-        # Split into partitioned-table directories and standalone files so
-        # each set can be disambiguated independently.
-        partitioned_dirs = [
-            d for d, pairs in dir_groups.items() if len(pairs) >= 2 and d != "."
-        ]
-        standalone_pairs = [
-            (file_id, meta)
-            for d, pairs in dir_groups.items()
-            if not (len(pairs) >= 2 and d != ".")
-            for file_id, meta in pairs
-        ]
-        partitioned_rs_ids = dict(
-            zip(partitioned_dirs, make_partition_record_set_ids(partitioned_dirs))
+    def _partition_file_set(self, table: _Table, rs_id: str) -> mlc.FileSet:
+        """One FileSet over a table's shards.
+
+        The id follows the record set's, which is already disambiguated: two
+        directories sharing a name would otherwise claim the same one.
+        """
+        if table.alone_in_dir:
+            suffix = "".join(Path(table.first_meta["file_name"]).suffixes)
+            includes = [f"{table.dir_path}/*{suffix}"]
+        else:
+            # A directory-wide glob would reach into the neighbouring tables.
+            includes = [f.meta["relative_path"] for f in table.files]
+
+        return mlc.FileSet(
+            id=f"{rs_id}-fileset",
+            name=f"{table.name} partition files",
+            description=f"{len(table.files)} Parquet partition files for table '{table.name}'",
+            encoding_formats=["application/vnd.apache.parquet"],
+            includes=includes,
         )
-        # Standalone Parquet files take their @id stem from the parent
-        # directory name when one exists, falling back to the cleaned
-        # file basename for files at the dataset root. Parquet basenames
-        # in real datasets are typically partition labels (`part-00000`,
-        # `0`, UUIDs) that make poor identifiers, so the parent dir is
-        # the more meaningful stem. Disambiguation walks up the
-        # grandparent path on collision.
-        standalone_id_items = []
-        for _, meta in standalone_pairs:
-            rel = Path(meta["relative_path"])
-            parents = list(rel.parts[:-1])
-            if parents:
-                stem = sanitize_id(parents[-1])
-                disambig_parents = parents[:-1]
-            else:
-                stem = sanitize_id(get_clean_record_name(meta["file_name"]))
-                disambig_parents = []
-            standalone_id_items.append((stem, disambig_parents))
-        standalone_rs_ids = _disambiguate_ids(standalone_id_items)
-        standalone_rs_id_by_index = {
-            id(meta): rs_id
-            for (_, meta), rs_id in zip(standalone_pairs, standalone_rs_ids)
-        }
 
-        for dir_path, pairs in dir_groups.items():
-            is_partitioned = len(pairs) >= 2 and dir_path != "."
+    def _partition_record_set(self, table: _Table, rs_id: str) -> mlc.RecordSet:
+        fields = self._fields(
+            table.first_meta,
+            rs_id,
+            {"file_set": f"{rs_id}-fileset"},
+            f"table '{table.name}'",
+        )
+        num_rows = sum(f.meta.get("num_rows", 0) for f in table.files)
+        return mlc.RecordSet(
+            id=rs_id,
+            name=table.name,
+            description=(
+                f"Partitioned table '{table.name}' "
+                f"({len(table.files)} Parquet files, {num_rows} total rows)"
+            ),
+            fields=fields,
+        )
 
-            if is_partitioned:
-                _, first_meta = pairs[0]
-                table_name = Path(dir_path).name
-                dir_id = sanitize_id(dir_path)
-                fileset_id = f"{dir_id}-fileset"
-                rs_id = partitioned_rs_ids[dir_path]
+    def _standalone_record_set(self, table: _Table, rs_id: str) -> mlc.RecordSet:
+        file = table.files[0]
+        fields = self._fields(
+            file.meta, rs_id, {"file_object": file.file_id}, display_name(file.meta)
+        )
+        num_rows = file.meta.get("num_rows")
+        row_desc = f" ({num_rows} rows)" if num_rows is not None else ""
+        return mlc.RecordSet(
+            id=rs_id,
+            name=table.name,
+            description=f"Records from {display_name(file.meta)}{row_desc}",
+            fields=fields,
+        )
 
-                _suffix = "".join(Path(pairs[0][1]["file_name"]).suffixes)
-                additional_distributions.append(
-                    mlc.FileSet(
-                        id=fileset_id,
-                        name=f"{table_name} partition files",
-                        description=f"{len(pairs)} Parquet partition files for table '{table_name}'",
-                        encoding_formats=["application/vnd.apache.parquet"],
-                        includes=[f"{dir_path}/*{_suffix}"],
-                    )
+    def _fields(self, meta: dict, rs_id: str, source: dict, origin: str) -> list:
+        if "arrow_schema" in meta:
+            return _build_fields(meta["arrow_schema"], rs_id, source)
+
+        used_field_ids: set = set()
+        fields = []
+        for col_name, col_type in meta["column_types"].items():
+            fields.append(
+                mlc.Field(
+                    id=make_field_id(rs_id, col_name, used_field_ids),
+                    name=col_name,
+                    description=f"Column '{col_name}' from {origin}",
+                    data_types=[col_type],
+                    source=mlc.Source(**source, extract=mlc.Extract(column=col_name)),
                 )
-
-                if "arrow_schema" in first_meta:
-                    fields = _build_fields(
-                        first_meta["arrow_schema"],
-                        rs_id,
-                        {"file_set": fileset_id},
-                    )
-                else:
-                    used_field_ids: set = set()
-                    fields = []
-                    for col_name, col_type in first_meta["column_types"].items():
-                        field_id = make_field_id(rs_id, col_name, used_field_ids)
-                        fields.append(
-                            mlc.Field(
-                                id=field_id,
-                                name=col_name,
-                                description=f"Column '{col_name}' from table '{table_name}'",
-                                data_types=[col_type],
-                                source=mlc.Source(
-                                    file_set=fileset_id,
-                                    extract=mlc.Extract(column=col_name),
-                                ),
-                            )
-                        )
-
-                num_rows = sum(m.get("num_rows", 0) for _, m in pairs)
-                record_sets.append(
-                    mlc.RecordSet(
-                        id=rs_id,
-                        name=table_name,
-                        description=f"Partitioned table '{table_name}' ({len(pairs)} Parquet files, {num_rows} total rows)",
-                        fields=fields,
-                    )
-                )
-            else:
-                # Standalone: one RecordSet per file
-                for file_id, file_meta in pairs:
-                    rel_dir = str(Path(file_meta["relative_path"]).parent)
-                    if rel_dir != ".":
-                        rs_name = Path(rel_dir).name
-                    else:
-                        rs_name = get_clean_record_name(file_meta["file_name"])
-                    rs_id = standalone_rs_id_by_index[id(file_meta)]
-
-                    if "arrow_schema" in file_meta:
-                        fields = _build_fields(
-                            file_meta["arrow_schema"],
-                            rs_id,
-                            {"file_object": file_id},
-                        )
-                    else:
-                        used_field_ids = set()
-                        fields = []
-                        for col_name, col_type in file_meta["column_types"].items():
-                            field_id = make_field_id(rs_id, col_name, used_field_ids)
-                            fields.append(
-                                mlc.Field(
-                                    id=field_id,
-                                    name=col_name,
-                                    description=f"Column '{col_name}' from {display_name(file_meta)}",
-                                    data_types=[col_type],
-                                    source=mlc.Source(
-                                        file_object=file_id,
-                                        extract=mlc.Extract(column=col_name),
-                                    ),
-                                )
-                            )
-
-                    num_rows = file_meta.get("num_rows")
-                    row_desc = f" ({num_rows} rows)" if num_rows is not None else ""
-                    record_sets.append(
-                        mlc.RecordSet(
-                            id=rs_id,
-                            name=rs_name,
-                            description=f"Records from {display_name(file_meta)}{row_desc}",
-                            fields=fields,
-                        )
-                    )
-
-        return additional_distributions, record_sets
+            )
+        return fields

@@ -1,5 +1,6 @@
 """Every file is accounted for, and one failure costs one file."""
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -217,3 +218,29 @@ def test_failing_clears_the_metadata_the_entry_was_carrying() -> None:
 
     assert entry.outcome is Outcome.FAILED
     assert entry.meta is None
+
+
+def test_an_undescribed_file_is_warned_about_as_it_is_scanned(tmp_path, caplog):
+    """The summary arrives at the end; a long bake needs to say so as it goes."""
+    (tmp_path / "data.csv").write_text("a,b\n1,2\n")
+    (tmp_path / "notes.md").write_text("free text")
+
+    with caplog.at_level(logging.WARNING, logger="croissant_baker"):
+        MetadataGenerator(dataset_path=str(tmp_path)).generate_metadata()
+
+    assert any(
+        "notes.md" in r.getMessage() and "no registered handler" in r.getMessage()
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_a_file_that_fails_to_parse_names_itself(tmp_path, caplog):
+    """The message that went missing in the refactor: which file, and why."""
+    (tmp_path / "ok.csv").write_text("a,b\n1,2\n")
+    (tmp_path / "broken.csv").write_text("# preamble\na,b,c,d,e\n1,2,3,4,5\n")
+
+    with caplog.at_level(logging.WARNING, logger="croissant_baker"):
+        MetadataGenerator(dataset_path=str(tmp_path)).generate_metadata()
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("broken.csv" in m and "CSV parse error" in m for m in messages), messages
