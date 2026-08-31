@@ -397,7 +397,8 @@ class MetadataGenerator:
                     handler.build_croissant(
                         [m for _, m in pairs],
                         [fid for fid, _ in pairs],
-                    )
+                    ),
+                    len(batch),
                 )
             except Exception as e:  # noqa: BLE001 — one batch, not the bake
                 logger.warning(
@@ -537,6 +538,29 @@ class MetadataGenerator:
         cpu = os.cpu_count() or 1
         return min(8, n_files, cpu * 2)
 
+    def display_path(self, entry: ScanEntry) -> str:
+        """The file as a reader would type it: relative to where they are.
+
+        ``entry.path`` is relative to the dataset root, which is the right key
+        for the report but the wrong thing to show — two directories deep, a
+        bare basename cannot be opened or grepped. Falls back to the absolute
+        path when the dataset sits outside the working directory.
+        """
+        full = self.dataset_path / entry.path
+        try:
+            return str(full.relative_to(Path.cwd()))
+        except ValueError:
+            return str(full)
+
+    def describe_refusal(self, entry: ScanEntry) -> str:
+        """One line for a file that was passed over: the reason, then the file.
+
+        Reason first because that is what a reader scans a column of these for;
+        the path last because it is the long part, and it is where a reader
+        goes once the reason has told them whether to care.
+        """
+        return f"{entry.detail}. File: {self.display_path(entry)}"
+
     def _warn_undescribed(self, entry: ScanEntry) -> None:
         """Report a file as it is passed over, not only in the closing summary.
 
@@ -548,13 +572,12 @@ class MetadataGenerator:
             self._warned += 1
             seen = self._warned
         if seen < MAX_UNDESCRIBED_WARNINGS:
-            logger.warning("%s: %s", entry.path, entry.detail)
+            logger.warning("%s", self.describe_refusal(entry))
         elif seen == MAX_UNDESCRIBED_WARNINGS:
             logger.warning(
-                "%s: %s (further per-file warnings suppressed; see the coverage "
+                "%s (further per-file warnings suppressed; see the coverage "
                 "summary, --verbose or --report)",
-                entry.path,
-                entry.detail,
+                self.describe_refusal(entry),
             )
 
     def _extract_entry(self, entry: ScanEntry) -> None:

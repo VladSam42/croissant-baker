@@ -44,41 +44,57 @@ class BuildResult:
         return iter((self.file_sets, self.record_sets))
 
     @classmethod
-    def coerce(cls, value: object) -> "BuildResult":
+    def coerce(cls, value: object, batch_size: int) -> "BuildResult":
         """Validate whatever a handler returned, in one place.
 
         Handlers are third-party code, so this is the boundary: a pair, a
-        triple or a ``BuildResult``, with the declined entries typed on the way
-        through. Anything else raises here rather than part-way through
-        assembly, where half a batch would already have been committed.
+        triple or a ``BuildResult``, with the declined entries typed and
+        range-checked on the way through. An index is only meaningful against
+        the batch the handler was given, which is why the size is passed in.
+        Anything else raises here rather than part-way through assembly, where
+        half a batch would already have been committed.
         """
         if isinstance(value, cls):
-            return value
-        if not isinstance(value, tuple) or not 2 <= len(value) <= 3:
+            parts = (value.file_sets, value.record_sets, value.declined)
+        elif isinstance(value, tuple) and 2 <= len(value) <= 3:
+            parts = (value[0], value[1], value[2] if len(value) == 3 else ())
+        else:
             raise TypeError(
                 "build_croissant must return (file_sets, record_sets) or a "
                 f"BuildResult; got {type(value).__name__} {value!r}"
             )
+        file_sets, record_sets, declined = parts
         return cls(
-            list(value[0]),
-            list(value[1]),
-            tuple(
-                _as_declined(entry) for entry in (value[2] if len(value) == 3 else ())
-            ),
+            list(file_sets),
+            list(record_sets),
+            tuple(_as_declined(entry, batch_size) for entry in declined),
         )
 
 
-def _as_declined(entry: object) -> Declined:
+def _as_declined(entry: object, batch_size: int) -> Declined:
     """One declined entry, however a handler spelled it."""
+    from croissant_baker.scan import Reason
+
     if isinstance(entry, Declined):
-        return entry
-    if not isinstance(entry, (tuple, list)) or len(entry) != 3:
+        index, reason, detail = entry.index, entry.reason, entry.detail
+    elif isinstance(entry, (tuple, list)) and len(entry) == 3:
+        index, reason, detail = entry
+    else:
         raise ValueError(
             "each declined entry must be (index, Reason, detail) or a "
             f"Declined; got {entry!r}"
         )
-    index, reason, detail = entry
-    return Declined(int(index), reason, str(detail))
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        raise ValueError(f"declined index must be an integer; got {index!r}") from None
+    if not 0 <= index < batch_size:
+        raise ValueError(
+            f"declined index {index} names no file in a batch of {batch_size}"
+        )
+    if not isinstance(reason, Reason):
+        raise ValueError(f"declined reason must be a Reason; got {reason!r}")
+    return Declined(index, reason, str(detail))
 
 
 class InputKind(str, Enum):

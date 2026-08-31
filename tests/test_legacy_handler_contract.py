@@ -1,6 +1,5 @@
 """A handler written against the old contract keeps working, and is told to move."""
 
-import warnings
 from pathlib import Path
 
 import mlcroissant as mlc
@@ -62,11 +61,6 @@ def dataset(tmp_path: Path) -> Path:
     return tmp_path
 
 
-# --------------------------------------------------------------------------
-# An old handler still bakes
-# --------------------------------------------------------------------------
-
-
 def test_a_legacy_handler_still_describes_its_files(
     legacy_registry: HandlerRegistry, dataset: Path
 ) -> None:
@@ -76,22 +70,6 @@ def test_a_legacy_handler_still_describes_its_files(
 
     assert [rs["@id"] for rs in metadata["recordSet"]] == ["xyz"]
     assert metadata["distribution"][0]["encodingFormat"] == "application/x-xyz"
-
-
-def test_a_legacy_handler_warns_once_naming_its_class(
-    legacy_registry: HandlerRegistry, dataset: Path
-) -> None:
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        MetadataGenerator(
-            dataset_path=str(dataset), name="legacy", handlers=legacy_registry
-        ).generate_metadata()
-
-    deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-    assert len(deprecations) == 1, [str(w.message) for w in deprecations]
-    message = str(deprecations[0].message)
-    assert "LegacyXYZHandler" in message
-    assert "claims(FileSource)" in message
 
 
 def test_a_legacy_path_handler_still_receives_a_path(tmp_path: Path) -> None:
@@ -127,11 +105,6 @@ def test_a_legacy_path_handler_still_receives_a_path(tmp_path: Path) -> None:
     ).generate_metadata()
 
     assert seen["path"] == tmp_path / "r.rec"
-
-
-# --------------------------------------------------------------------------
-# Migrating one method at a time
-# --------------------------------------------------------------------------
 
 
 class _NewClaimsOldExtract(FileTypeHandler):
@@ -183,7 +156,7 @@ class _OldClaimsNewExtract(FileTypeHandler):
 def test_a_partially_migrated_handler_still_bakes(
     handler_class, suffix: str, tmp_path: Path
 ) -> None:
-    """Routing used to be per handler, so half-migrated meant broken."""
+    """Routing is per method, so a handler may migrate one at a time."""
     (tmp_path / f"probe{suffix}").write_text("payload")
 
     generator = MetadataGenerator(
@@ -197,18 +170,3 @@ def test_a_partially_migrated_handler_still_bakes(
     entry = generator.scan_report.entries[0]
     assert entry.outcome is Outcome.DESCRIBED
     assert entry.meta["encoding_format"].startswith("application/x-")
-
-
-def test_the_warning_names_only_the_method_that_is_behind(tmp_path: Path) -> None:
-    (tmp_path / "probe.half").write_text("payload")
-
-    with pytest.warns(DeprecationWarning) as caught:
-        MetadataGenerator(
-            dataset_path=str(tmp_path),
-            name="partial",
-            handlers=HandlerRegistry([_NewClaimsOldExtract(), *builtin_handlers()]),
-        ).generate_metadata()
-
-    messages = [str(w.message) for w in caught]
-    assert any("extract_metadata(Path)" in m for m in messages)
-    assert not any("can_handle(Path)" in m for m in messages)

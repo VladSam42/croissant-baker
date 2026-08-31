@@ -131,10 +131,10 @@ def _schema_of(meta: dict) -> str:
     schema = meta.get("arrow_schema")
     if schema is None:
         return str(list(meta["column_types"].items()))
-    # Names and types only, which is what ``Schema.equals`` compares by
-    # default. Rendering the schema kept field-level metadata in the key, so
-    # two shards Arrow calls equal could land in different groups.
-    return str([(field.name, str(field.type)) for field in schema])
+    # Exactly what ``Schema.equals`` compares by default: name, type and
+    # nullability. Rendering the schema instead kept field-level metadata in
+    # the key, which Arrow ignores; dropping nullability went the other way.
+    return str([(f.name, str(f.type), f.nullable) for f in schema])
 
 
 def _group_tables(file_metas: list, file_ids: list) -> tuple:

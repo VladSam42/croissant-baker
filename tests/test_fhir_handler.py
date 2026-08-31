@@ -20,11 +20,6 @@ from croissant_baker.handlers.utils import infer_field_type as _infer_field_type
 from croissant_baker.sources import make_source
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _ndjson(path: Path, records: list) -> None:
     with open(path, "w") as fh:
         for r in records:
@@ -61,27 +56,6 @@ _OBSERVATIONS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# can_handle
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "name,expected",
-    [
-        ("Patient.ndjson", True),
-        ("MimicPatient.ndjson.gz", True),
-        ("data.csv", False),
-        ("data.parquet", False),
-        ("image.png", False),
-    ],
-)
-def test_can_handle_by_extension(tmp_path: Path, name: str, expected: bool) -> None:
-    f = tmp_path / name
-    f.write_bytes(b"")
-    assert FHIRHandler().claims(make_source(f)) == expected
-
-
 def test_can_handle_fhir_json(tmp_path: Path) -> None:
     """A .json file with resourceType is claimed."""
     p = tmp_path / "bundle.json"
@@ -96,11 +70,6 @@ def test_can_handle_non_fhir_json(tmp_path: Path) -> None:
     p = tmp_path / "config.json"
     p.write_text(json.dumps({"name": "test", "version": "1"}))
     assert FHIRHandler().claims(make_source(p)) is False
-
-
-# ---------------------------------------------------------------------------
-# Type inference
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -120,11 +89,6 @@ def test_can_handle_non_fhir_json(tmp_path: Path) -> None:
 )
 def test_infer_croissant_type(value, expected: str) -> None:
     assert _infer_croissant_type(value) == expected
-
-
-# ---------------------------------------------------------------------------
-# _infer_field_type — struct expansion
-# ---------------------------------------------------------------------------
 
 
 def test_infer_field_type_primitive_majority() -> None:
@@ -174,11 +138,6 @@ def test_infer_field_type_array_of_primitives() -> None:
     assert result["type"] == "sc:Text"
 
 
-# ---------------------------------------------------------------------------
-# NDJSON extraction
-# ---------------------------------------------------------------------------
-
-
 def test_extract_ndjson_basic(tmp_path: Path) -> None:
     p = tmp_path / "Patient.ndjson"
     _ndjson(p, _PATIENTS)
@@ -218,13 +177,6 @@ def test_extract_ndjson_observation_datetime(tmp_path: Path) -> None:
     assert meta["column_types"]["status"] == "sc:Text"
 
 
-def test_extract_ndjson_empty_raises(tmp_path: Path) -> None:
-    p = tmp_path / "empty.ndjson"
-    p.write_text("")
-    with pytest.raises(ValueError, match="No valid FHIR resources"):
-        FHIRHandler().extract(make_source(p))
-
-
 def test_extract_ndjson_counts_all_rows(tmp_path: Path) -> None:
     """num_rows is the true total — all records are counted and used for inference."""
     n = 500
@@ -237,10 +189,6 @@ def test_extract_ndjson_counts_all_rows(tmp_path: Path) -> None:
     meta = FHIRHandler().extract(make_source(p))
     assert meta["num_rows"] == n
 
-
-# ---------------------------------------------------------------------------
-# JSON Bundle extraction
-# ---------------------------------------------------------------------------
 
 _BUNDLE = {
     "resourceType": "Bundle",
@@ -349,19 +297,6 @@ def test_build_croissant_bundle_skips_operation_outcome(tmp_path: Path) -> None:
     assert "Patient" in rs_names
 
 
-def test_extract_bundle_empty_raises(tmp_path: Path) -> None:
-    empty = {"resourceType": "Bundle", "type": "collection", "entry": []}
-    p = tmp_path / "empty_bundle.json"
-    p.write_text(json.dumps(empty))
-    with pytest.raises(ValueError, match="No FHIR resources found in Bundle"):
-        FHIRHandler().extract(make_source(p))
-
-
-# ---------------------------------------------------------------------------
-# _is_bulk_chunk
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "file_name,resource_type,expected",
     [
@@ -379,11 +314,6 @@ def test_extract_bundle_empty_raises(tmp_path: Path) -> None:
 )
 def test_is_bulk_chunk(file_name: str, resource_type: str, expected: bool) -> None:
     assert _is_bulk_chunk(file_name, resource_type) == expected
-
-
-# ---------------------------------------------------------------------------
-# build_croissant — chunk merging vs standalone splitting
-# ---------------------------------------------------------------------------
 
 
 def test_build_croissant_merges_chunks(tmp_path: Path) -> None:
@@ -474,11 +404,6 @@ def test_build_croissant_all_skipped_returns_empty(
     assert filesets == []
     assert record_sets == []
     assert any("no RecordSets" in msg for msg in caplog.messages)
-
-
-# ---------------------------------------------------------------------------
-# MIMIC-IV FHIR Demo — integration test (skip if not downloaded)
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture

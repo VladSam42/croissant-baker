@@ -33,13 +33,6 @@ def test_can_handle_hea_file(wfdb_sample_path):
     assert handler.claims(make_source(wfdb_sample_path, with_path=True))
 
 
-def test_cannot_handle_non_hea_file(tmp_path):
-    handler = WFDBHandler()
-    csv_file = tmp_path / "test.csv"
-    csv_file.write_text("data")
-    assert not handler.claims(make_source(csv_file, with_path=True))
-
-
 def test_extract_metadata(wfdb_sample_path):
     handler = WFDBHandler()
     metadata = handler.extract(make_source(wfdb_sample_path, with_path=True))
@@ -77,11 +70,6 @@ def test_rdheader_failure_is_wrapped(tmp_path):
     ):
         with pytest.raises(ValueError, match="Failed to read WFDB header"):
             handler.extract(make_source(hea_file, with_path=True))
-
-
-# ---------------------------------------------------------------------------
-# build_croissant
-# ---------------------------------------------------------------------------
 
 
 def test_wfdb_build_croissant() -> None:

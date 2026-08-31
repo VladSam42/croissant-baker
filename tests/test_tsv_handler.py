@@ -7,34 +7,6 @@ from croissant_baker.handlers.tsv_handler import TSVHandler
 from croissant_baker.sources import make_source
 
 
-# ---------------------------------------------------------------------------
-# can_handle
-# ---------------------------------------------------------------------------
-
-
-def test_tsv_handler_can_handle() -> None:
-    handler = TSVHandler()
-    assert handler.claims(make_source(Path("data.tsv")))
-    assert handler.claims(make_source(Path("data.TSV")))
-    assert handler.claims(make_source(Path("data.tsv.gz")))
-    assert handler.claims(make_source(Path("data.tsv.bz2")))
-    assert handler.claims(make_source(Path("data.tsv.xz")))
-    assert not handler.claims(make_source(Path("data.csv")))
-    assert not handler.claims(make_source(Path("data.tsv.zip")))
-
-
-def test_tsv_handler_does_not_claim_csv() -> None:
-    """TSVHandler must not claim .csv files — CSVHandler owns those."""
-    handler = TSVHandler()
-    assert not handler.claims(make_source(Path("patients.csv")))
-    assert not handler.claims(make_source(Path("patients.csv.gz")))
-
-
-# ---------------------------------------------------------------------------
-# extract_metadata
-# ---------------------------------------------------------------------------
-
-
 def test_tsv_extract_metadata_types(tmp_path: Path) -> None:
     """Tab-separated data is parsed with correct types and MIME type."""
     tsv_file = tmp_path / "results.tsv"
@@ -84,11 +56,6 @@ def test_tsv_delimiter_not_confused_with_csv(tmp_path: Path) -> None:
     meta = TSVHandler().extract(make_source(tsv_file))
 
     assert meta["num_columns"] == 1
-
-
-# ---------------------------------------------------------------------------
-# build_croissant — inherited from CSVHandler
-# ---------------------------------------------------------------------------
 
 
 def test_tsv_build_croissant() -> None:

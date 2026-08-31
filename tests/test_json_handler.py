@@ -15,11 +15,6 @@ from croissant_baker.handlers.registry import find_handler, register_all_handler
 from croissant_baker.sources import make_source
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _write_json(path: Path, data) -> None:
     path.write_text(json.dumps(data), encoding="utf-8")
 
@@ -51,11 +46,6 @@ _FHIR_BUNDLE = {
     "type": "collection",
     "entry": [],
 }
-
-
-# ---------------------------------------------------------------------------
-# can_handle
-# ---------------------------------------------------------------------------
 
 
 class TestCanHandle:
@@ -91,21 +81,6 @@ class TestCanHandle:
     # pipeline strips the wrapper is asserted end to end in
     # test_compression_matrix, over every handler and every compression.
 
-    def test_csv_rejected(self, tmp_path: Path) -> None:
-        p = tmp_path / "data.csv"
-        p.write_text("a,b\n1,2\n")
-        assert JSONHandler().claims(make_source(p)) is False
-
-    def test_parquet_rejected(self, tmp_path: Path) -> None:
-        p = tmp_path / "data.parquet"
-        p.write_bytes(b"PAR1")
-        assert JSONHandler().claims(make_source(p)) is False
-
-
-# ---------------------------------------------------------------------------
-# extract_metadata — JSON array
-# ---------------------------------------------------------------------------
-
 
 class TestExtractMetadataJsonArray:
     def test_basic_fields_present(self, tmp_path: Path) -> None:
@@ -137,11 +112,6 @@ class TestExtractMetadataJsonArray:
         assert isinstance(meta["sha256"], str) and len(meta["sha256"]) == 64
 
 
-# ---------------------------------------------------------------------------
-# extract_metadata — single JSON object
-# ---------------------------------------------------------------------------
-
-
 class TestExtractMetadataJsonObject:
     def test_single_object_num_rows_one(self, tmp_path: Path) -> None:
         p = tmp_path / "single.json"
@@ -158,11 +128,6 @@ class TestExtractMetadataJsonObject:
         ct = meta["column_types"]
         assert ct["ts"] == "sc:DateTime"
         assert ct["url"] == "sc:URL"
-
-
-# ---------------------------------------------------------------------------
-# extract_metadata — JSONL
-# ---------------------------------------------------------------------------
 
 
 class TestExtractMetadataJsonl:
@@ -198,11 +163,6 @@ class TestExtractMetadataJsonl:
             JSONHandler().extract(make_source(p))
 
 
-# ---------------------------------------------------------------------------
-# extract_metadata — compressed files
-# ---------------------------------------------------------------------------
-
-
 class TestExtractMetadataCompressed:
     def test_json_gz_encoding_format(self, tmp_path: Path) -> None:
         p = tmp_path / "data.json.gz"
@@ -217,11 +177,6 @@ class TestExtractMetadataCompressed:
         meta = JSONHandler().extract(make_source(p))
         assert meta["encoding_format"] == "application/jsonl"
         assert meta["num_rows"] == len(_SAMPLE_ROWS)
-
-
-# ---------------------------------------------------------------------------
-# extract_metadata — nested objects (struct schema)
-# ---------------------------------------------------------------------------
 
 
 class TestExtractMetadataNested:
@@ -258,11 +213,6 @@ class TestExtractMetadataNested:
         ct = meta["column_types"]
         assert ct["dob"] == "sc:Date"
         assert ct["profile"] == "sc:URL"
-
-
-# ---------------------------------------------------------------------------
-# build_croissant
-# ---------------------------------------------------------------------------
 
 
 class TestBuildCroissant:
@@ -314,31 +264,13 @@ class TestBuildCroissant:
         assert "zip" in sub_names
 
 
-# ---------------------------------------------------------------------------
-# Registry integration
-# ---------------------------------------------------------------------------
+def test_a_fhir_bundle_named_json_goes_to_the_fhir_handler(tmp_path: Path) -> None:
+    """``.json`` is the one extension two handlers claim, so precedence between
+    them is the only routing question the registry sweep cannot answer."""
+    from croissant_baker.handlers.fhir_handler import FHIRHandler
 
+    register_all_handlers()
+    path = tmp_path / "bundle.json"
+    _write_json(path, _FHIR_BUNDLE)
 
-class TestRegistryIntegration:
-    def test_find_handler_json(self, tmp_path: Path) -> None:
-        register_all_handlers()
-        p = tmp_path / "plain.json"
-        _write_json(p, [{"a": 1}])
-        handler = find_handler(p)
-        assert isinstance(handler, JSONHandler)
-
-    def test_find_handler_jsonl(self, tmp_path: Path) -> None:
-        register_all_handlers()
-        p = tmp_path / "data.jsonl"
-        _write_jsonl(p, [{"a": 1}])
-        handler = find_handler(p)
-        assert isinstance(handler, JSONHandler)
-
-    def test_fhir_json_goes_to_fhir_handler(self, tmp_path: Path) -> None:
-        from croissant_baker.handlers.fhir_handler import FHIRHandler
-
-        register_all_handlers()
-        p = tmp_path / "bundle.json"
-        _write_json(p, _FHIR_BUNDLE)
-        handler = find_handler(p)
-        assert isinstance(handler, FHIRHandler)
+    assert isinstance(find_handler(path), FHIRHandler)

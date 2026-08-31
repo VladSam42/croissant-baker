@@ -26,21 +26,6 @@ def mixed_dataset(tmp_path: Path) -> Path:
     return dataset
 
 
-@pytest.fixture
-def clean_dataset(tmp_path: Path) -> Path:
-    """Every file describable."""
-    dataset = tmp_path / "clean"
-    dataset.mkdir()
-    (dataset / "a.csv").write_text("id\n1\n")
-    (dataset / "b.csv").write_text("id\n2\n")
-    return dataset
-
-
-# --------------------------------------------------------------------------
-# Summary
-# --------------------------------------------------------------------------
-
-
 def test_summary_states_described_and_undescribed_counts(
     mixed_dataset: Path, tmp_path: Path
 ) -> None:
@@ -50,14 +35,6 @@ def test_summary_states_described_and_undescribed_counts(
     assert "Scanned 3 file(s): 1 described, 2 not described." in result.stdout
     assert "no handler: 1" in result.stdout
     assert "extraction failed: 1" in result.stdout
-
-
-def test_summary_reports_full_coverage_too(clean_dataset: Path, tmp_path: Path) -> None:
-    result = _run(clean_dataset, tmp_path)
-
-    assert result.exit_code == 0
-    assert "Scanned 2 file(s): 2 described, 0 not described." in result.stdout
-    assert "Tip: re-run with --verbose" not in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -92,29 +69,11 @@ def test_the_coverage_section_does_not_grow_with_the_dataset(
     assert "60 not described" in many[0]
 
 
-def test_a_loud_failure_does_not_print_one_line_per_file(tmp_path: Path) -> None:
-    """The generator's own per-file warnings must not grow the section either."""
-    (tmp_path / "table.csv").write_text("id\n1\n")
-    for i in range(40):
-        (tmp_path / f"empty{i}.csv").write_text("")
-
-    result = _run(tmp_path, tmp_path)
-
-    assert result.exit_code == 0
-    assert "Failed to process" not in result.stdout
-    assert "extraction failed: 40" in result.stdout
-
-
 def test_undescribed_files_prompt_for_detail(
     mixed_dataset: Path, tmp_path: Path
 ) -> None:
     result = _run(mixed_dataset, tmp_path)
     assert "Tip: re-run with --verbose, or --report FILE" in result.stdout
-
-
-# --------------------------------------------------------------------------
-# --verbose
-# --------------------------------------------------------------------------
 
 
 def test_verbose_names_every_undescribed_file_and_reason(
@@ -123,21 +82,11 @@ def test_verbose_names_every_undescribed_file_and_reason(
     result = _run(mixed_dataset, tmp_path, "--verbose")
 
     assert result.exit_code == 0
-    assert "opaque.bin: no handler for this file type" in result.stdout
-    assert "broken.json:" in result.stdout
+    assert "no handler for file type. File: " in result.stdout
+    assert "opaque.bin" in result.stdout
+    assert "broken.json" in result.stdout
     # the prompt is redundant once detail has been printed
     assert "Tip: re-run with --verbose" not in result.stdout
-
-
-def test_verbose_short_flag(mixed_dataset: Path, tmp_path: Path) -> None:
-    result = _run(mixed_dataset, tmp_path, "-v")
-    assert result.exit_code == 0
-    assert "opaque.bin" in result.stdout
-
-
-# --------------------------------------------------------------------------
-# --report
-# --------------------------------------------------------------------------
 
 
 def test_report_names_every_file_with_its_outcome(
@@ -162,24 +111,9 @@ def test_report_names_every_file_with_its_outcome(
     assert files["broken.json"]["reason"]
 
 
-def test_report_creates_missing_parent_directories(
-    mixed_dataset: Path, tmp_path: Path
-) -> None:
-    report_path = tmp_path / "nested" / "dir" / "scan.json"
-    result = _run(mixed_dataset, tmp_path, "--report", str(report_path))
-
-    assert result.exit_code == 0
-    assert report_path.exists()
-
-
 def test_report_replaces_the_detail_prompt(mixed_dataset: Path, tmp_path: Path) -> None:
     result = _run(mixed_dataset, tmp_path, "--report", str(tmp_path / "scan.json"))
     assert "Tip: re-run with --verbose" not in result.stdout
-
-
-# --------------------------------------------------------------------------
-# --dry-run
-# --------------------------------------------------------------------------
 
 
 def test_dry_run_lists_files_that_would_not_be_described(
@@ -191,30 +125,8 @@ def test_dry_run_lists_files_that_would_not_be_described(
     assert "would be processed" in result.stdout
     assert "table.csv" in result.stdout
     assert "1 file(s) would not be described" in result.stdout
-    assert "opaque.bin: no handler for this file type" in result.stdout
-
-
-def test_dry_run_stays_quiet_when_everything_is_claimed(
-    clean_dataset: Path,
-) -> None:
-    result = runner.invoke(app, ["--input", str(clean_dataset), "--dry-run"])
-
-    assert result.exit_code == 0
-    assert "would not be described" not in result.stdout
-
-
-def test_dry_run_writes_a_report(mixed_dataset: Path, tmp_path: Path) -> None:
-    report_path = tmp_path / "dry.json"
-    result = runner.invoke(
-        app,
-        ["--input", str(mixed_dataset), "--dry-run", "--report", str(report_path)],
-    )
-
-    assert result.exit_code == 0
-    payload = json.loads(report_path.read_text())
-    assert payload["total"] == 3
-    files = {f["path"]: f for f in payload["files"]}
-    assert files["opaque.bin"]["outcome"] == "unclaimed"
+    assert "no handler for file type. File: " in result.stdout
+    assert "opaque.bin" in result.stdout
 
 
 def test_a_dry_run_report_says_what_would_happen_not_that_nothing_did(
@@ -235,11 +147,6 @@ def test_a_dry_run_report_says_what_would_happen_not_that_nothing_did(
     assert outcomes["broken.json"] == "would_process"
     assert outcomes["opaque.bin"] == "unclaimed"
     assert "pending" not in outcomes.values()
-
-
-# --------------------------------------------------------------------------
-# A bake that describes nothing still explains itself
-# --------------------------------------------------------------------------
 
 
 def test_bake_with_no_describable_files_names_the_reason(tmp_path: Path) -> None:

@@ -166,7 +166,7 @@ def _echo_scan_coverage(
     undescribed = scan_report.undescribed
     if verbose:
         for entry in undescribed:
-            typer.echo(f"  {entry.path}: {entry.detail}")
+            typer.echo(f"  {generator.describe_refusal(entry)}")
 
     if report_path:
         _write_scan_report(scan_report, report_path)
@@ -763,7 +763,7 @@ def main(
                     f"{len(unclaimed)} file(s) would not be described in '{input}':"
                 )
                 for entry in unclaimed:
-                    typer.echo(f"  {entry.path}: {entry.detail}")
+                    typer.echo(f"  {entry.detail}. File: {entry.path}")
 
             if report:
                 _write_scan_report(ScanReport(entries), report)

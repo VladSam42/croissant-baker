@@ -24,11 +24,6 @@ DATA = Path(__file__).parent / "data" / "input"
 _SPECT = DATA / "spect_demo"
 
 
-# --------------------------------------------------------------------------
-# Sample data: one entry per handler, keyed by class name
-# --------------------------------------------------------------------------
-
-
 def _csv() -> list:
     return [("data.csv", b"id,name,score\n1,Ada,9.5\n2,Grace,9.9\n")]
 
@@ -109,11 +104,6 @@ EXEMPT: dict[str, str] = {
 }
 
 
-# --------------------------------------------------------------------------
-# Writing fixture files, wrapped or plain
-# --------------------------------------------------------------------------
-
-
 def write_wrapped(directory: Path, name: str, payload: bytes, suffix: str = "") -> Path:
     """Write ``payload`` to ``directory/name+suffix``, compressing if asked."""
     target = directory / f"{name}{suffix}"
@@ -130,11 +120,6 @@ def write_wrapped(directory: Path, name: str, payload: bytes, suffix: str = "") 
 def write_all(directory: Path, files: Iterable[tuple], suffix: str = "") -> None:
     for name, payload in files:
         write_wrapped(directory, name, payload, suffix)
-
-
-# --------------------------------------------------------------------------
-# Baking
-# --------------------------------------------------------------------------
 
 
 def bake(directory: Path, **kwargs) -> dict:
@@ -175,11 +160,6 @@ def cli(dataset: Path, output: Path, *extra: str):
             *extra,
         ],
     )
-
-
-# --------------------------------------------------------------------------
-# Navigating a baked document
-# --------------------------------------------------------------------------
 
 
 def _typed(doc: dict, node_type: str) -> list:

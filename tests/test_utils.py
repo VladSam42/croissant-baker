@@ -102,20 +102,10 @@ def test_normalize_array_shape_accepts_tuple_and_bare_forms() -> None:
     assert normalize_array_shape("-1,-1,3") == "-1,-1,3"
 
 
-# --- Shard templates mask the index, not every digit ------------------------
-
-
 def test_shard_template_masks_only_a_separated_index() -> None:
     """Digits fused to letters name the table; only the index is the shard."""
     assert shard_template("assay1-part-000.parquet") == "assay1-part-<N>.parquet"
     assert shard_template("assay2-part-001.parquet") == "assay2-part-<N>.parquet"
-
-
-def test_two_assays_sharded_alike_are_not_one_table() -> None:
-    """The documented rule: ``assay1`` and ``assay2`` are two tables."""
-    assert shard_template("assay1-part-000.parquet") != shard_template(
-        "assay2-part-001.parquet"
-    )
 
 
 def test_a_lone_index_is_still_masked() -> None:

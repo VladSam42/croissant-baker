@@ -133,7 +133,7 @@ class HandlerRegistry:
             )
         return HandlerSelection(
             reason=Reason.NO_HANDLER,
-            refusal="no handler for this file",
+            refusal="no handler for file type",
         )
 
 

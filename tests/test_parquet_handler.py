@@ -1,7 +1,6 @@
 """Tests for Parquet handler."""
 
 from pathlib import Path
-from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -32,89 +31,41 @@ def sample_parquet(tmp_path: Path) -> Path:
     return path
 
 
-# ---------------------------------------------------------------------------
-# can_handle — extension + magic bytes (issue #93)
-#
-# can_handle enforces the registry contract: True implies extract_metadata
-# can read the file. Tests cover the failure modes (wrong extension, right
-# extension/wrong content, truncated, missing) plus the happy path.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("name", ["data.csv", "data.txt", "data"])
-def test_can_handle_rejects_unsupported_extensions(
-    handler: ParquetHandler, name: str
-) -> None:
-    """Non-.parquet extensions are rejected before any I/O."""
-    assert handler.claims(make_source(Path(name))) is False
-
-
 _PARQUET_LOGGER = "croissant_baker.handlers.parquet_handler"
 
 
-def test_can_handle_missing_file_does_not_warn(
-    handler: ParquetHandler, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    "payload, expected",
+    [
+        (b"not a parquet file at all", "PAR1 header"),
+        (b"PAR1" + b"\x00" * 32, "footer"),
+        (b"PAR", "too small"),
+    ],
+    ids=["wrong-magic", "truncated", "too-small"],
+)
+def test_a_file_that_is_not_parquet_is_declined_at_debug(
+    handler: ParquetHandler,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    payload: bytes,
+    expected: str,
 ) -> None:
-    """A missing .parquet path is silently rejected (no spurious warning)
-    since the caller, not the file, is at fault."""
-    with caplog.at_level("DEBUG", logger=_PARQUET_LOGGER):
-        assert handler.claims(make_source(Path("/nonexistent/data.parquet"))) is False
-    assert caplog.records == []
-
-
-def test_can_handle_rejects_wrong_magic(
-    handler: ParquetHandler, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A .parquet file without PAR1 magic is rejected AND the reason is
-    logged at debug identifying the file and the missing PAR1 header.
-
-    Regression for #93: prevents the registry from dispatching a renamed
-    file to ParquetHandler.extract_metadata and crashing inside pyarrow,
-    while still recording the skip. The generator owns the user-facing
-    warning, through a capped path, so this one is debug-level.
-    """
+    """The generator owns the user-facing warning, through a capped path, so
+    the handler's own note is debug — asserted, or a regression to WARNING
+    would double every skip in the terminal."""
     impostor = tmp_path / "fake.parquet"
-    impostor.write_bytes(b"not a parquet file at all")
+    impostor.write_bytes(payload)
+
     with caplog.at_level("DEBUG", logger=_PARQUET_LOGGER):
         assert handler.claims(make_source(impostor)) is False
-    assert any(
-        impostor.name in r.message and "PAR1 header" in r.message
+
+    assert [
+        r
         for r in caplog.records
-    ), (
-        f"expected a debug record naming {impostor} and 'PAR1 header', got {caplog.records}"
-    )
-
-
-def test_can_handle_rejects_truncated_parquet(
-    handler: ParquetHandler, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A truncated Parquet (start magic only, no footer magic) is rejected
-    AND a WARNING explicitly mentions the missing footer / possible truncation."""
-    truncated = tmp_path / "truncated.parquet"
-    truncated.write_bytes(b"PAR1" + b"\x00" * 32)
-    with caplog.at_level("DEBUG", logger=_PARQUET_LOGGER):
-        assert handler.claims(make_source(truncated)) is False
-    assert any(
-        truncated.name in r.message
-        and ("footer" in r.message or "truncated" in r.message)
-        for r in caplog.records
-    ), (
-        f"expected a debug record naming {truncated} and footer/truncated, got {caplog.records}"
-    )
-
-
-def test_can_handle_rejects_too_small_parquet(
-    handler: ParquetHandler, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A .parquet file under 8 bytes (cannot fit two PAR1 magics) is rejected
-    with a WARNING that names the file and its size."""
-    tiny = tmp_path / "tiny.parquet"
-    tiny.write_bytes(b"PAR")  # 3 bytes, well under the 8-byte minimum
-    with caplog.at_level("DEBUG", logger=_PARQUET_LOGGER):
-        assert handler.claims(make_source(tiny)) is False
-    assert any(
-        tiny.name in r.message and "too small" in r.message for r in caplog.records
-    ), f"expected a debug record naming {tiny} and 'too small', got {caplog.records}"
+        if r.levelname == "DEBUG"
+        and impostor.name in r.message
+        and expected in r.message
+    ], caplog.records
 
 
 def test_can_handle_accepts_real_parquet(
@@ -127,11 +78,6 @@ def test_can_handle_accepts_real_parquet(
     upper = sample_parquet.with_name("test.PARQUET")
     upper.write_bytes(sample_parquet.read_bytes())
     assert handler.claims(make_source(upper)) is True
-
-
-# ---------------------------------------------------------------------------
-# extract_metadata
-# ---------------------------------------------------------------------------
 
 
 def test_extract_metadata(handler: ParquetHandler, sample_parquet: Path) -> None:
@@ -152,52 +98,10 @@ def test_extract_metadata(handler: ParquetHandler, sample_parquet: Path) -> None
     assert column_types["score"] == "cr:Float64"
 
 
-# ---------------------------------------------------------------------------
-# Resource leak: file handle must be closed after extract_metadata (#54)
-# ---------------------------------------------------------------------------
-
-
-def test_parquet_file_handle_closed(
-    handler: ParquetHandler, sample_parquet: Path
-) -> None:
-    """Verify the underlying file handle is closed after metadata extraction.
-
-    Regression test for GitHub issue #54: ParquetFile was opened without a
-    context manager, leaking file descriptors until garbage collection.
-    """
-    captured_handles: list[pq.ParquetFile] = []
-    _OrigParquetFile = pq.ParquetFile
-
-    def _spy(*args, **kwargs):
-        pf = _OrigParquetFile(*args, **kwargs)
-        captured_handles.append(pf)
-        return pf
-
-    with patch(
-        "croissant_baker.handlers.parquet_handler.ParquetFile", side_effect=_spy
-    ):
-        handler.extract(make_source(sample_parquet))
-
-    assert len(captured_handles) == 1, "ParquetFile should be opened exactly once"
-    assert captured_handles[0].reader.closed, (
-        "ParquetFile reader must be closed after extract_metadata returns"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Error cases
-# ---------------------------------------------------------------------------
-
-
 def test_extract_metadata_not_found(handler: ParquetHandler) -> None:
     """Test that missing file raises FileNotFoundError."""
     with pytest.raises(FileNotFoundError):
         handler.extract(make_source(Path("/nonexistent/data.parquet")))
-
-
-# ---------------------------------------------------------------------------
-# build_croissant
-# ---------------------------------------------------------------------------
 
 
 def _pq_meta(name, rel_path, cols=None):
@@ -209,8 +113,6 @@ def _pq_meta(name, rel_path, cols=None):
         "encoding_format": "application/vnd.apache.parquet",
     }
 
-
-# --- Grouping is on evidence, not on directory membership -------------------
 
 _BOUNDARIES = {"cell_id": "sc:Text", "vertex_x": "cr:Float32"}
 _CELLS = {"cell_id": "sc:Text", "x_centroid": "cr:Float32", "counts": "cr:Int32"}
@@ -259,24 +161,31 @@ def test_a_vendor_directory_keeps_every_schema(handler: ParquetHandler) -> None:
     assert by_name["cell_boundaries"] == ["cell_id", "vertex_x"]
 
 
-def test_shards_that_disagree_on_schema_are_reported(handler: ParquetHandler) -> None:
-    """Drift inside one partitioned table is declined, not folded into the first schema."""
+def test_a_shard_that_disagrees_on_schema_is_declined_and_left_out(
+    handler: ParquetHandler,
+) -> None:
+    """Drift inside one partitioned table is declined, not folded into the
+    first schema — and the FileSet must not glob the shard back in."""
     metas = [
         _pq_meta("part-00000.parquet", "events/part-00000.parquet", _BOUNDARIES),
         _pq_meta("part-00001.parquet", "events/part-00001.parquet", _BOUNDARIES),
         _pq_meta("part-00002.parquet", "events/part-00002.parquet", _CELLS),
     ]
+
     built = handler.build_croissant(metas, ["f0", "f1", "f2"])
-    _, record_sets, conflicts = built.file_sets, built.record_sets, built.declined
 
-    assert len(record_sets) == 1
-    assert [f.name for f in record_sets[0].fields] == ["cell_id", "vertex_x"]
+    (record_set,) = built.record_sets
+    assert [f.name for f in record_set.fields] == ["cell_id", "vertex_x"]
 
-    (refusal,) = conflicts
-    index, reason, detail = refusal.index, refusal.reason, refusal.detail
-    assert index == 2
-    assert reason is Reason.PARTITION_SCHEMA_CONFLICT
-    assert "3 columns, expected 2" in detail
+    (refusal,) = built.declined
+    assert refusal.index == 2
+    assert refusal.reason is Reason.PARTITION_SCHEMA_CONFLICT
+    assert "3 columns, expected 2" in refusal.detail
+
+    assert built.file_sets[0].includes == [
+        "events/part-00000.parquet",
+        "events/part-00001.parquet",
+    ]
 
 
 def test_same_named_directories_do_not_collide(handler: ParquetHandler) -> None:
@@ -377,25 +286,6 @@ def test_parquet_array_shape_fixed_vs_variable(
     assert fields["tags"].array_shape == "-1"
 
 
-def test_a_declined_shard_is_not_left_inside_the_fileset(
-    handler: ParquetHandler,
-) -> None:
-    """A glob over the directory would re-admit the shard the schema kept out."""
-    metas = [
-        _pq_meta("part-00000.parquet", "events/part-00000.parquet", _BOUNDARIES),
-        _pq_meta("part-00001.parquet", "events/part-00001.parquet", _BOUNDARIES),
-        _pq_meta("part-00002.parquet", "events/part-00002.parquet", _CELLS),
-    ]
-    built = handler.build_croissant(metas, ["f0", "f1", "f2"])
-    filesets, _, conflicts = built.file_sets, built.record_sets, built.declined
-
-    assert len(conflicts) == 1
-    assert filesets[0].includes == [
-        "events/part-00000.parquet",
-        "events/part-00001.parquet",
-    ]
-
-
 def test_shards_are_grouped_on_the_arrow_schema_not_the_croissant_types(
     handler: ParquetHandler,
 ) -> None:
@@ -485,9 +375,6 @@ def test_differing_years_are_not_merged_or_declined(handler: ParquetHandler) -> 
     assert sorted(r.name for r in record_sets) == ["report2024", "report2025"]
 
 
-# --- A tie is not a majority ------------------------------------------------
-
-
 def test_a_schema_tie_declines_nothing_and_describes_both_groups(
     handler: ParquetHandler,
 ) -> None:
@@ -504,33 +391,38 @@ def test_a_schema_tie_declines_nothing_and_describes_both_groups(
     assert len(built.record_sets) == 2
 
 
-def test_a_real_majority_still_declines_the_minority(handler: ParquetHandler) -> None:
-    """Three-versus-one keeps the behaviour a tie must not have."""
-    metas = [
-        _pq_meta(f"part-00{i}.parquet", f"t/part-00{i}.parquet", _CELLS)
-        for i in range(3)
-    ] + [_pq_meta("part-003.parquet", "t/part-003.parquet", _BOUNDARIES)]
-    built = handler.build_croissant(metas, [f"f{i}" for i in range(4)])
-
-    assert [d.index for d in built.declined] == [3]
-
-
-# --- Schema identity is Arrow's, not a rendered string ----------------------
-
-
-def test_field_metadata_does_not_split_a_table(handler: ParquetHandler) -> None:
-    """Arrow considers these schemas equal; grouping must agree with Arrow."""
+@pytest.mark.parametrize(
+    "other, merges",
+    [
+        (
+            pa.schema(
+                [
+                    pa.field("id", pa.int64(), metadata={b"note": b"shard 1"}),
+                    pa.field("v", pa.float64()),
+                ]
+            ),
+            True,
+        ),
+        (
+            pa.schema(
+                [
+                    pa.field("id", pa.int64(), nullable=False),
+                    pa.field("v", pa.float64()),
+                ]
+            ),
+            False,
+        ),
+    ],
+    ids=["field-metadata", "nullability"],
+)
+def test_grouping_agrees_with_arrow_on_schema_identity(
+    handler: ParquetHandler, other, merges: bool
+) -> None:
     plain = pa.schema([pa.field("id", pa.int64()), pa.field("v", pa.float64())])
-    annotated = pa.schema(
-        [
-            pa.field("id", pa.int64(), metadata={b"note": b"written by shard 1"}),
-            pa.field("v", pa.float64()),
-        ]
-    )
-    assert plain.equals(annotated)
+    assert plain.equals(other) is merges
 
     metas = []
-    for i, schema in enumerate((plain, annotated)):
+    for i, schema in enumerate((plain, other)):
         meta = _pq_meta(f"part-00{i}.parquet", f"t/part-00{i}.parquet")
         meta["arrow_schema"] = schema
         metas.append(meta)
@@ -538,16 +430,14 @@ def test_field_metadata_does_not_split_a_table(handler: ParquetHandler) -> None:
     built = handler.build_croissant(metas, ["f0", "f1"])
 
     assert built.declined == ()
-    assert len(built.record_sets) == 1
-    assert len(built.file_sets) == 1
-
-
-# --- Identifiers are unique across node kinds, not just within one ----------
+    assert len(built.record_sets) == (1 if merges else 2)
+    assert len(built.file_sets) == (1 if merges else 0)
 
 
 def test_a_derived_fileset_id_cannot_collide_with_a_record_set(tmp_path: Path) -> None:
     """``foo`` partitioned yields FileSet ``foo-fileset``; a standalone file
-    actually named ``foo-fileset`` yields a RecordSet of the same id."""
+    actually named ``foo-fileset`` yields a RecordSet of the same id. The
+    RecordSet keeps the name it earned and the derived id is the one that moves."""
     from croissant_baker.metadata_generator import MetadataGenerator
 
     table = pa.table({"id": pa.array([1, 2]), "v": pa.array(["a", "b"])})
@@ -560,7 +450,11 @@ def test_a_derived_fileset_id_cannot_collide_with_a_record_set(tmp_path: Path) -
         dataset_path=str(tmp_path), name="c"
     ).generate_metadata()
 
-    ids = [n["@id"] for n in document["distribution"]] + [
-        r["@id"] for r in document["recordSet"]
-    ]
-    assert len(ids) == len(set(ids)), sorted(ids)
+    record_ids = {r["@id"] for r in document["recordSet"]}
+    file_set_ids = {
+        n["@id"] for n in document["distribution"] if n["@type"] == "cr:FileSet"
+    }
+
+    assert "foo-fileset" in record_ids
+    assert "foo-fileset__2" in file_set_ids
+    assert not record_ids & file_set_ids

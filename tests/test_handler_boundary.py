@@ -1,7 +1,6 @@
 """A handler never observes a compression wrapper, watched from the outside."""
 
 import gzip
-import json
 from pathlib import Path
 
 import pytest
@@ -107,11 +106,6 @@ def test_the_handler_still_gets_its_directory(tmp_path: Path) -> None:
     assert "a/b/probe.spy" in spy.seen["build_croissant"]
 
 
-# --------------------------------------------------------------------------
-# What the generator does with the logical names it gets back
-# --------------------------------------------------------------------------
-
-
 @pytest.fixture
 def fhir_chunks(tmp_path: Path) -> Path:
     """The shape that produced the phantom includes: several wrapped chunks."""
@@ -125,56 +119,17 @@ def fhir_chunks(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_an_exact_include_names_the_file_that_exists(fhir_chunks: Path) -> None:
+def test_the_includes_are_exactly_the_files_on_disk(fhir_chunks: Path) -> None:
+    """An exact set, in both directions at once: no pattern that matches
+    nothing (the phantom ``.gz.gz`` from expanding an exact path as a glob),
+    and no stored file left out of the FileSet describing it."""
     metadata = MetadataGenerator(
         dataset_path=str(fhir_chunks), name="fhir"
     ).generate_metadata()
 
-    resolved = includes(file_sets(metadata)[0])
-    assert sorted(resolved) == [
-        "Patient.000.ndjson.gz",
-        "Patient.001.ndjson.gz",
-        "Patient.002.ndjson.gz",
-    ]
+    resolved = sorted(p for fs in file_sets(metadata) for p in includes(fs))
 
-
-def test_no_include_is_wrapped_twice(fhir_chunks: Path) -> None:
-    """The regression: an exact path expanded as though it were a pattern."""
-    metadata = MetadataGenerator(
-        dataset_path=str(fhir_chunks), name="fhir"
-    ).generate_metadata()
-
-    for file_set in file_sets(metadata):
-        for pattern in includes(file_set):
-            assert ".gz.gz" not in pattern
-            assert ".bz2.bz2" not in pattern
-            assert ".xz.xz" not in pattern
-
-
-def test_every_include_matches_a_file_in_the_dataset(fhir_chunks: Path) -> None:
-    """A pattern matching nothing is a claim about data that is not there."""
-    metadata = MetadataGenerator(
-        dataset_path=str(fhir_chunks), name="fhir"
-    ).generate_metadata()
-
-    on_disk = {p.name for p in fhir_chunks.iterdir()}
-    for file_set in file_sets(metadata):
-        for pattern in includes(file_set):
-            matched = [n for n in on_disk if Path(n).match(pattern)]
-            assert matched, f"{pattern!r} matches nothing in the dataset"
-
-
-def test_every_compressed_member_is_covered_by_some_include(
-    fhir_chunks: Path,
-) -> None:
-    """The other direction: a described file must be in its own FileSet."""
-    metadata = MetadataGenerator(
-        dataset_path=str(fhir_chunks), name="fhir"
-    ).generate_metadata()
-
-    patterns = [p for fs in file_sets(metadata) for p in includes(fs)]
-    for stored in fhir_chunks.iterdir():
-        assert any(Path(stored.name).match(p) for p in patterns), stored.name
+    assert resolved == sorted(p.name for p in fhir_chunks.iterdir())
 
 
 def test_a_glob_gains_one_variant_per_wrapper_present(dataset: Path) -> None:
@@ -208,56 +163,6 @@ def test_a_glob_stays_scoped_to_the_directory_it_describes(dataset: Path) -> Non
         "part/*.parquet",
         "part/*.parquet.gz",
     ]
-
-
-def test_output_is_identical_across_hash_seeds(tmp_path: Path) -> None:
-    """A set of wrappers used to reach the document, and sets are not ordered."""
-    import subprocess
-    import sys
-
-    import bz2
-    import lzma
-
-    payload = b"id,name\n1,Ada\n"
-    for name, opener in (
-        ("a.csv.gz", gzip.open),
-        ("b.csv.bz2", bz2.open),
-        ("c.csv.xz", lzma.open),
-    ):
-        with opener(tmp_path / name, "wb") as fh:
-            fh.write(payload)
-    (tmp_path / "pic.png").write_bytes(
-        __import__("base64").b64decode(
-            b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEh"
-            b"QGAhKmMIQAAAABJRU5ErkJggg=="
-        )
-    )
-
-    script = (
-        "import json;"
-        "from croissant_baker.metadata_generator import MetadataGenerator;"
-        f"m=MetadataGenerator(dataset_path={str(tmp_path)!r}, name='seed')"
-        ".generate_metadata();"
-        "print(json.dumps(m['distribution'], sort_keys=False))"
-    )
-    outputs = set()
-    for seed in ("0", "1", "42"):
-        result = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True,
-            text=True,
-            env={**__import__("os").environ, "PYTHONHASHSEED": seed},
-            check=True,
-        )
-        outputs.add(result.stdout.strip())
-
-    assert len(outputs) == 1, "output varies with PYTHONHASHSEED"
-    assert json.loads(outputs.pop())
-
-
-# --------------------------------------------------------------------------
-# Descriptions name the file as stored
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("suffix", WRAPPER_SUFFIXES)

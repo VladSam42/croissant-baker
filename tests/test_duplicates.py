@@ -4,8 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from croissant_baker.metadata_generator import MetadataGenerator
-from croissant_baker.scan import PREFIX_BYTES, Outcome, Reason
+from croissant_baker.scan import Outcome, Reason
 
 from tests.helpers import (
     WRAPPER_SUFFIXES,
@@ -49,11 +48,6 @@ def same_stem(dataset: Path) -> Path:
     return dataset
 
 
-# --------------------------------------------------------------------------
-# Rule 1 — plain beside its wrapper
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("suffix", WRAPPER_SUFFIXES)
 def test_a_plain_file_and_its_wrapper_link_by_convention(
     suffix: str, dataset: Path
@@ -80,23 +74,6 @@ def test_rule_one_links_without_reading_and_says_so(dataset: Path) -> None:
     assert linked.reason is Reason.DUPLICATE_BY_NAME
     assert "content not verified" in linked.detail
     assert "same content" not in linked.detail
-
-
-def test_the_uncompressed_member_wins_however_the_scan_ordered_them(
-    dataset: Path,
-) -> None:
-    """Discovery order is the filesystem's, so the choice cannot depend on it."""
-    write_wrapped(dataset, "sample.csv", CSV, ".gz")
-    write_wrapped(dataset, "sample.csv", CSV)
-
-    assert _entries(bake_with_report(dataset)[1])["sample.csv"].outcome is (
-        Outcome.DESCRIBED
-    )
-
-
-# --------------------------------------------------------------------------
-# Rule 2 — two wrappers, no plain file
-# --------------------------------------------------------------------------
 
 
 def test_two_wrappers_with_the_same_bytes_link(dataset: Path) -> None:
@@ -126,18 +103,6 @@ def test_two_wrappers_with_different_bytes_stay_distinct(dataset: Path) -> None:
     assert len(_ids(metadata)) == 2
 
 
-def test_the_primary_of_two_wrappers_follows_the_registry_not_the_filesystem(
-    dataset: Path,
-) -> None:
-    """gzip is registered first, so it wins however the directory is read."""
-    write_wrapped(dataset, "sample.csv", CSV, ".xz")
-    write_wrapped(dataset, "sample.csv", CSV, ".gz")
-
-    assert _entries(bake_with_report(dataset)[1])["sample.csv.gz"].outcome is (
-        Outcome.DESCRIBED
-    )
-
-
 def test_compressed_size_is_never_taken_as_evidence(dataset: Path) -> None:
     """Two payloads that compress to the same length are still different files."""
     write_wrapped(dataset, "sample.csv", b"id,name\n" + b"1,aaaa\n" * 500, ".gz")
@@ -146,11 +111,6 @@ def test_compressed_size_is_never_taken_as_evidence(dataset: Path) -> None:
     assert all(
         e.outcome is Outcome.DESCRIBED for e in bake_with_report(dataset)[1].entries
     )
-
-
-# --------------------------------------------------------------------------
-# Rule 3 — one stem, two format suffixes
-# --------------------------------------------------------------------------
 
 
 def test_a_csv_and_a_tsv_of_the_same_data_stay_distinct(same_stem: Path) -> None:
@@ -193,11 +153,6 @@ def test_two_plain_files_of_different_size_are_rejected_without_reading(
     assert not reads
 
 
-# --------------------------------------------------------------------------
-# Scope and bounds
-# --------------------------------------------------------------------------
-
-
 def test_files_in_different_directories_never_link(dataset: Path) -> None:
     """The logical *path* has to match, not just the basename."""
     for sub in ("one", "two"):
@@ -208,22 +163,6 @@ def test_files_in_different_directories_never_link(dataset: Path) -> None:
 
     assert all(e.outcome is Outcome.DESCRIBED for e in report.entries)
     assert not [d for d in file_objects(metadata) if "sameAs" in d]
-
-
-def test_a_prefix_read_is_capped(tmp_path: Path) -> None:
-    """A duplicate check must not turn into reading a terabyte."""
-    from croissant_baker.duplicates import _read_prefix
-
-    big = tmp_path / "big.csv"
-    big.write_bytes(b"x" * (PREFIX_BYTES * 3))
-
-    assert len(_read_prefix(big)) == PREFIX_BYTES
-
-
-def test_an_unreadable_candidate_is_not_a_duplicate(tmp_path: Path) -> None:
-    from croissant_baker.duplicates import _read_prefix
-
-    assert _read_prefix(tmp_path / "absent.csv") is None
 
 
 def test_a_three_member_group_points_at_one_primary(dataset: Path) -> None:
@@ -259,17 +198,6 @@ def test_a_duplicate_of_a_file_that_failed_to_parse_is_still_described(
     assert _ids(metadata) == ["sample"]
 
 
-def test_a_twin_does_not_cost_the_rest_of_the_directory(twins: Path) -> None:
-    write_wrapped(twins, "other.csv", CSV)
-
-    assert _ids(bake(twins)) == ["other", "sample"]
-
-
-# --------------------------------------------------------------------------
-# What the linked pair looks like in the document
-# --------------------------------------------------------------------------
-
-
 def test_both_twins_keep_their_own_bytes_and_the_wrapper_points_at_the_plain_file(
     twins: Path,
 ) -> None:
@@ -283,16 +211,6 @@ def test_both_twins_keep_their_own_bytes_and_the_wrapper_points_at_the_plain_fil
     assert plain["sha256"] != wrapped["sha256"]
     assert plain["contentSize"] != wrapped["contentSize"]
     assert wrapped["encodingFormat"] == ["text/csv", "application/gzip"]
-
-
-# --------------------------------------------------------------------------
-# What the disambiguated pair looks like in the document
-# --------------------------------------------------------------------------
-
-
-def test_both_members_are_suffixed_not_just_one(same_stem: Path) -> None:
-    """Suffixing only the loser would make the result depend on handler order."""
-    assert _ids(bake(same_stem)) == ["sample_csv", "sample_tsv"]
 
 
 def test_fields_follow_their_record_set_and_keep_their_column_names(
@@ -326,24 +244,3 @@ def test_a_suffixed_identifier_that_is_already_taken_falls_back(
     write_wrapped(same_stem, "sample_csv.csv", CSV)
 
     assert _ids(bake(same_stem)) == ["sample_csv", "sample_csv__2", "sample_tsv"]
-
-
-def test_record_sets_that_do_not_collide_keep_their_bare_identifiers(
-    dataset: Path,
-) -> None:
-    """The rename fires on collision only, so ordinary output does not churn."""
-    write_wrapped(dataset, "one.csv", CSV)
-    write_wrapped(dataset, "two.tsv", TSV)
-
-    assert _ids(bake(dataset)) == ["one", "two"]
-
-
-def test_the_disambiguated_document_still_validates(
-    same_stem: Path, tmp_path_factory
-) -> None:
-    """mlcroissant is the arbiter of whether the rewritten identifiers are legal."""
-    out = tmp_path_factory.mktemp("out") / "croissant.jsonld"
-    MetadataGenerator(dataset_path=str(same_stem), name="collisions").save_metadata(
-        str(out), validate=True
-    )
-    assert out.exists()

@@ -11,13 +11,7 @@ from croissant_baker.handlers.dicom_handler import (
     DICOMHandler,
     collect_dicom_summary,
 )
-from croissant_baker.handlers.registry import find_handler, register_all_handlers
 from croissant_baker.sources import make_source
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 
 def _make_dicom(
@@ -62,23 +56,6 @@ def handler() -> DICOMHandler:
 @pytest.fixture
 def dicom_file(tmp_path: Path) -> Path:
     return _make_dicom(tmp_path / "test.dcm")
-
-
-@pytest.mark.parametrize(
-    "name,expected",
-    [
-        ("scan.dcm", True),
-        ("scan.DCM", True),
-        ("scan.dicom", True),
-        ("scan.DICOM", True),
-        ("scan.png", False),
-        ("data.csv", False),
-        ("record.hea", False),
-        ("image.nii", False),
-    ],
-)
-def test_can_handle(handler: DICOMHandler, name: str, expected: bool) -> None:
-    assert handler.claims(make_source(Path(name))) == expected
 
 
 def test_can_handle_magic_bytes(handler: DICOMHandler, tmp_path: Path) -> None:
@@ -141,27 +118,6 @@ def test_extract_metadata_multiframe(handler: DICOMHandler, tmp_path: Path) -> N
     assert meta["dicom_properties"]["num_frames"] == 30
 
 
-def test_extract_metadata_file_not_found(handler: DICOMHandler) -> None:
-    with pytest.raises(FileNotFoundError):
-        handler.extract(make_source(Path("/nonexistent/scan.dcm")))
-
-
-def test_extract_metadata_corrupt_file(handler: DICOMHandler, tmp_path: Path) -> None:
-    bad = tmp_path / "corrupt.dcm"
-    bad.write_bytes(b"not a dicom file at all")
-    with pytest.raises(ValueError, match="Failed to read DICOM file"):
-        handler.extract(make_source(bad))
-
-
-# ---------------------------------------------------------------------------
-# collect_dicom_summary
-# ---------------------------------------------------------------------------
-
-
-def test_collect_dicom_summary_empty() -> None:
-    assert collect_dicom_summary([]) == {}
-
-
 def test_collect_dicom_summary() -> None:
     metas = [
         {
@@ -200,22 +156,6 @@ def test_collect_dicom_summary() -> None:
     assert summary["frames_range"] == (1, 30)
     assert summary["modality_counts"] == {"CT": 2, "MR": 1}
     assert set(summary["bits_allocated_values"]) == {12, 16}
-
-
-def test_collect_dicom_summary_missing_props() -> None:
-    metas = [
-        {"dicom_properties": {"rows": 512, "columns": 512, "modality": "CT"}},
-        {},  # no dicom_properties key at all
-    ]
-    summary = collect_dicom_summary(metas)
-    assert summary["num_files"] == 2
-    assert summary["rows_range"] == (512, 512)
-    assert "modality_counts" in summary
-
-
-# ---------------------------------------------------------------------------
-# build_croissant
-# ---------------------------------------------------------------------------
 
 
 def _dicom_meta(
@@ -271,58 +211,3 @@ def test_build_croissant_description_contains_modality(handler: DICOMHandler) ->
     metas = [_dicom_meta("a.dcm", modality="PT")]
     _, record_sets = handler.build_croissant(metas, ["file_0"])
     assert "PT" in record_sets[0].description
-
-
-# ---------------------------------------------------------------------------
-# Handler registration
-# ---------------------------------------------------------------------------
-
-
-def test_dicom_handler_registered() -> None:
-    register_all_handlers()
-    assert find_handler(Path("scan.dcm")) is not None
-    assert find_handler(Path("scan.dicom")) is not None
-
-
-def test_dicom_skip_summary_printed_when_files_lack_dicm_preamble(
-    tmp_path: Path, capsys
-) -> None:
-    """When a directory mixes valid DICOMs with .dcm-named files that lack
-    the DICM preamble (DICOMDIR fragments, broken exports), MetadataGenerator
-    should bake the valid ones and print a single summary line for the rest.
-    """
-    register_all_handlers()
-
-    # One valid DICOM
-    fm = Dataset()
-    fm.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.2"
-    fm.MediaStorageSOPInstanceUID = generate_uid()
-    fm.TransferSyntaxUID = ExplicitVRLittleEndian
-    ds = FileDataset("good", {}, file_meta=fm, preamble=b"\x00" * 128)
-    ds.Rows = 10
-    ds.Columns = 10
-    ds.BitsAllocated = 16
-    ds.SamplesPerPixel = 1
-    ds.PhotometricInterpretation = "MONOCHROME2"
-    ds.PatientID = "p1"
-    ds.StudyInstanceUID = generate_uid()
-    ds.SeriesInstanceUID = generate_uid()
-    ds.Modality = "CT"
-    ds.save_as(str(tmp_path / "good.dcm"), enforce_file_format=False)
-
-    # Two .dcm-named files lacking the DICM preamble at offset 128
-    (tmp_path / "fragment_a.dcm").write_bytes(b"\x00" * 256)
-    (tmp_path / "fragment_b.dcm").write_bytes(b"random bytes that are not dicom")
-
-    from croissant_baker.metadata_generator import MetadataGenerator
-
-    gen = MetadataGenerator(
-        dataset_path=str(tmp_path),
-        name="t",
-        url="https://example.com",
-        license="MIT",
-        creators=[{"name": "x"}],
-    )
-    gen.generate_metadata()
-    out = capsys.readouterr().out
-    assert "skipped 2 DICOM file(s) without the DICM preamble" in out

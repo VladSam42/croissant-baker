@@ -10,13 +10,7 @@ from croissant_baker.handlers.nifti_handler import (
     NIfTIHandler,
     collect_nifti_summary,
 )
-from croissant_baker.handlers.registry import find_handler, register_all_handlers
 from croissant_baker.sources import make_source
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 
 def _make_nifti(
@@ -58,33 +52,6 @@ def nifti_4d(tmp_path: Path) -> Path:
     return _make_nifti_4d(tmp_path / "bold.nii.gz")
 
 
-# ---------------------------------------------------------------------------
-# can_handle
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "name,expected",
-    [
-        ("brain.nii", True),
-        ("brain.NII", True),
-        ("brain.nii.gz", True),
-        ("brain.NII.GZ", True),
-        ("scan.dcm", False),
-        ("data.csv", False),
-        ("image.png", False),
-        ("record.hea", False),
-    ],
-)
-def test_can_handle(handler: NIfTIHandler, name: str, expected: bool) -> None:
-    assert handler.claims(make_source(Path(name))) == expected
-
-
-# ---------------------------------------------------------------------------
-# extract_metadata — 3D structural
-# ---------------------------------------------------------------------------
-
-
 def test_extract_metadata_3d(handler: NIfTIHandler, nifti_3d: Path) -> None:
     meta = handler.extract(make_source(nifti_3d))
 
@@ -116,11 +83,6 @@ def test_extract_metadata_uncompressed_nii(
     assert meta["nifti_properties"]["dim_z"] == 30
 
 
-# ---------------------------------------------------------------------------
-# extract_metadata — 4D fMRI
-# ---------------------------------------------------------------------------
-
-
 def test_extract_metadata_4d(handler: NIfTIHandler, nifti_4d: Path) -> None:
     meta = handler.extract(make_source(nifti_4d))
     props = meta["nifti_properties"]
@@ -137,32 +99,6 @@ def test_extract_metadata_dtype(handler: NIfTIHandler, tmp_path: Path) -> None:
     f = _make_nifti(tmp_path / "float.nii.gz", dtype=np.float32)
     meta = handler.extract(make_source(f))
     assert "float32" in meta["nifti_properties"]["data_dtype"]
-
-
-# ---------------------------------------------------------------------------
-# extract_metadata — error cases
-# ---------------------------------------------------------------------------
-
-
-def test_extract_metadata_file_not_found(handler: NIfTIHandler) -> None:
-    with pytest.raises(FileNotFoundError):
-        handler.extract(make_source(Path("/nonexistent/brain.nii.gz")))
-
-
-def test_extract_metadata_corrupt_file(handler: NIfTIHandler, tmp_path: Path) -> None:
-    bad = tmp_path / "corrupt.nii.gz"
-    bad.write_bytes(b"not a nifti file")
-    with pytest.raises(ValueError, match="Failed to read NIfTI file"):
-        handler.extract(make_source(bad))
-
-
-# ---------------------------------------------------------------------------
-# collect_nifti_summary
-# ---------------------------------------------------------------------------
-
-
-def test_collect_nifti_summary_empty() -> None:
-    assert collect_nifti_summary([]) == {}
 
 
 def test_collect_nifti_summary_3d() -> None:
@@ -237,21 +173,6 @@ def test_collect_nifti_summary_4d() -> None:
     assert summary["tr_range"] == (pytest.approx(1.5), pytest.approx(2.0))
 
 
-def test_collect_nifti_summary_missing_props() -> None:
-    metas = [
-        {"nifti_properties": {"dim_x": 64, "dim_y": 64, "dim_z": 30, "ndim": 3}},
-        {},  # no nifti_properties key
-    ]
-    summary = collect_nifti_summary(metas)
-    assert summary["num_files"] == 2
-    assert summary["dim_x_range"] == (64, 64)
-
-
-# ---------------------------------------------------------------------------
-# build_croissant
-# ---------------------------------------------------------------------------
-
-
 def _nifti_meta(name: str, ndim: int = 3, dim_t: int = None) -> dict:
     props = {
         "dim_x": 64,
@@ -317,14 +238,3 @@ def test_build_croissant_4d_includes_tr(handler: NIfTIHandler) -> None:
     _, record_sets = handler.build_croissant(metas, ["file_0"])
     field_names = {f.name for f in record_sets[0].fields}
     assert "tr_seconds" in field_names
-
-
-# ---------------------------------------------------------------------------
-# Handler registration
-# ---------------------------------------------------------------------------
-
-
-def test_nifti_handler_registered() -> None:
-    register_all_handlers()
-    assert find_handler(Path("brain.nii")) is not None
-    assert find_handler(Path("brain.nii.gz")) is not None

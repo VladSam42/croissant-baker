@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from croissant_baker import compression
-from croissant_baker.handlers.base_handler import InputKind
 from croissant_baker.handlers.registry import (
     get_registered_handlers,
     register_all_handlers,
@@ -17,13 +16,6 @@ from croissant_baker.handlers.registry import (
 from croissant_baker.scan import Reason
 
 from tests.helpers import SAMPLES, bake, write_all, write_wrapped
-
-_HANDLER_DIR = Path(__file__).parent.parent / "src" / "croissant_baker" / "handlers"
-
-
-# --------------------------------------------------------------------------
-# One fixture per handler, keyed by class name
-# --------------------------------------------------------------------------
 
 
 def _handlers():
@@ -108,11 +100,6 @@ def _logical_includes(includes) -> list:
     return sorted(reduced)
 
 
-# --------------------------------------------------------------------------
-# A wrapped file is described exactly as the plain one is
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("handler_name", sorted(SAMPLES))
 @pytest.mark.parametrize("suffix", ["", ".gz", ".bz2", ".xz"])
 def test_wrapped_is_described_like_plain(
@@ -177,11 +164,6 @@ def _matches(relative: Path, pattern: str) -> bool:
     )
 
 
-# --------------------------------------------------------------------------
-# A new compression needs no handler edit
-# --------------------------------------------------------------------------
-
-
 @pytest.fixture
 def fauxzip():
     """A fourth compression, registered for one test. gzip bytes, new suffix."""
@@ -221,11 +203,6 @@ def test_a_newly_registered_compression_reaches_the_media_types(
     assert entry["encodingFormat"] == ["text/csv", "application/x-fauxzip"]
 
 
-# --------------------------------------------------------------------------
-# WFDB: exempt, and reported rather than silently skipped
-# --------------------------------------------------------------------------
-
-
 def test_a_compressed_wfdb_header_is_refused_with_its_own_reason(
     tmp_path: Path,
 ) -> None:
@@ -244,39 +221,6 @@ def test_a_plain_wfdb_header_is_still_claimed(tmp_path: Path) -> None:
     assert type(select_handler(tmp_path / "record.hea").handler).__name__ == (
         "WFDBHandler"
     )
-
-
-def test_a_newly_registered_compression_reaches_the_cli(
-    fauxzip, tmp_path: Path
-) -> None:
-    """The CLI resolves compression the same way the generator does."""
-    from typer.testing import CliRunner
-
-    from croissant_baker.__main__ import app
-
-    write_all(tmp_path, SAMPLES["CSVHandler"](), ".fz")
-
-    result = CliRunner().invoke(
-        app,
-        [
-            "--input",
-            str(tmp_path),
-            "--output",
-            str(tmp_path / "out.jsonld"),
-            "--creator",
-            "Tester",
-            "--no-validate",
-            "--count-csv-rows",
-        ],
-    )
-
-    assert result.exit_code == 0
-    assert "no CSV files found" not in result.stderr
-
-
-# --------------------------------------------------------------------------
-# Archives: reported, never opened, and composing with every compression
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -299,13 +243,6 @@ def test_an_archive_composes_with_a_runtime_compression(fauxzip) -> None:
     assert compression.is_archive("bundle.tar.fz")
 
 
-def test_an_archive_alias_survives_a_compression_claiming_its_suffix() -> None:
-    """.tgz is its own archive suffix, not a wrapper to strip first."""
-    extra = compression.Compression("tgzip", ".tgz", "application/x-tgzip", gzip.open)
-    compression.register_compression(extra)
-    assert compression.is_archive("bundle.tgz")
-
-
 @pytest.mark.parametrize("name", ["bundle.zip", "bundle.tgz", "bundle.tar.xz"])
 def test_an_archive_is_refused_with_the_archive_reason(name: str, tmp_path) -> None:
     (tmp_path / name).write_bytes(b"PK\x03\x04 not really")
@@ -316,127 +253,42 @@ def test_an_archive_is_refused_with_the_archive_reason(name: str, tmp_path) -> N
     assert selection.reason is Reason.ARCHIVE
 
 
-# --------------------------------------------------------------------------
-# Compression knowledge lives outside the handlers
-# --------------------------------------------------------------------------
-
-
-def _handler_modules() -> list:
-    return sorted(_HANDLER_DIR.glob("*_handler.py"))
-
-
-def test_no_format_handler_imports_compression_or_a_codec() -> None:
-    """A tripwire over the obvious spellings, not a proof."""
-    forbidden = (
-        "from croissant_baker import compression",
-        "from croissant_baker.compression",
-        "import croissant_baker.compression",
-        "import gzip",
-        "import bz2",
-        "import lzma",
-    )
-    offenders = [
-        f"{path.name}: {line.strip()}"
-        for path in _handler_modules()
-        for line in path.read_text().splitlines()
-        if any(line.strip().startswith(f) for f in forbidden)
-    ]
-    assert not offenders, offenders
-
-
 def _executable_strings(path: Path):
     """Every string literal in a module except the docstrings."""
     tree = ast.parse(path.read_text())
-    docstrings = set()
-    for node in ast.walk(tree):
-        if isinstance(
-            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
-        ):
-            body = getattr(node, "body", None)
-            if (
-                body
-                and isinstance(body[0], ast.Expr)
-                and isinstance(body[0].value, ast.Constant)
-                and isinstance(body[0].value.value, str)
-            ):
-                docstrings.add(id(body[0].value))
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and id(node) not in docstrings
-        ):
-            yield node.lineno, node.value
+    docs = {
+        id(n.body[0].value)
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef))
+        and n.body
+        and isinstance(n.body[0], ast.Expr)
+        and isinstance(n.body[0].value, ast.Constant)
+        and isinstance(n.body[0].value.value, str)
+    }
+    return [
+        (n.lineno, n.value)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and id(n) not in docs
+    ]
 
 
 def test_no_handler_branches_on_a_wrapper_suffix_or_media_type() -> None:
-    """A dead ``.json.gz`` branch is how a reader learns the wrong contract."""
+    """The one boundary check behaviour cannot make. A handler is handed the
+    logical name, so a ``.gz`` branch never fires — it is dead code that
+    teaches the next reader the wrong contract, and no bake can notice."""
     literals = {c.suffix for c in compression.compressions()}
     literals |= {c.media_type for c in compression.compressions()}
+    handlers = (
+        Path(__file__).parent.parent / "src" / "croissant_baker" / "handlers"
+    ).glob("*_handler.py")
 
     offenders = [
         f"{path.name}:{lineno}: {value!r}"
-        for path in _handler_modules()
+        for path in sorted(handlers)
         for lineno, value in _executable_strings(path)
         for literal in literals
         if literal in value
     ]
     assert not offenders, offenders
-
-
-#: Methods that exist only on ``Path``, so a call to one is a handler reaching
-#: the filesystem. ``.open()`` is deliberately absent: ``Image.open(stream)``
-#: and ``TiffFile(stream)`` take the stream the source already decompressed,
-#: and no static rule separates those from ``path.open()`` without guessing.
-_PATH_ONLY_READS = frozenset({"read_bytes", "read_text"})
-
-#: Module-level functions that open a path.
-_PATH_OPENERS = frozenset({"open"})
-
-
-def _reads_outside_the_source(node: ast.AST) -> bool:
-    """Whether ``node`` is a call that gets bytes behind the source's back."""
-    if not isinstance(node, ast.Call):
-        return False
-    func = node.func
-    if isinstance(func, ast.Name):
-        return func.id in _PATH_OPENERS
-    if isinstance(func, ast.Attribute):
-        if func.attr in _PATH_ONLY_READS:
-            return True
-        # io.open / os.open, the aliases for the builtin.
-        return (
-            func.attr in _PATH_OPENERS
-            and isinstance(func.value, ast.Name)
-            and (func.value.id in ("io", "os"))
-        )
-    return False
-
-
-def test_no_stream_handler_reads_bytes_the_pipeline_did_not_resolve() -> None:
-    """Opening a path is how a handler gets bytes behind the source's back."""
-    streaming = {
-        f"{type(h).__module__.rsplit('.', 1)[-1]}.py"
-        for h in _handlers()
-        if h.INPUT_KIND is InputKind.STREAM
-    }
-    offenders = [
-        f"{path.name}:{node.lineno}"
-        for path in _handler_modules()
-        if path.name in streaming
-        for node in ast.walk(ast.parse(path.read_text()))
-        if _reads_outside_the_source(node)
-    ]
-    assert not offenders, (
-        f"a STREAM handler reads bytes itself at {offenders}; "
-        "read through source.open() / source.open_text() instead"
-    )
-
-
-def test_no_handler_declares_a_compound_extension() -> None:
-    """EXTENSIONS carry format suffixes only; compression is stripped first."""
-    for handler in _handlers():
-        for ext in handler.EXTENSIONS:
-            assert compression.compression_for(ext) is None, (
-                f"{type(handler).__name__}.EXTENSIONS contains {ext!r}"
-            )

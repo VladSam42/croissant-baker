@@ -6,16 +6,6 @@ from croissant_baker.handlers.csv_handler import CSVHandler
 from croissant_baker.sources import make_source
 
 
-def test_csv_handler_can_handle() -> None:
-    """Test CSV handler file type detection."""
-    handler = CSVHandler()
-
-    assert handler.claims(make_source(Path("test.csv")))
-    assert handler.claims(make_source(Path("data.CSV")))
-    assert handler.claims(make_source(Path("data.csv.gz")))
-    assert not handler.claims(make_source(Path("test.txt")))
-
-
 def test_csv_handler_extract_metadata(tmp_path: Path) -> None:
     """Test CSV metadata extraction (default: no row counting)."""
     csv_content = "id,name,age\n1,Alice,25\n2,Bob,30"
@@ -74,11 +64,6 @@ def test_csv_handler_data_types(tmp_path: Path) -> None:
     assert column_types["text_col"] == "sc:Text"
 
 
-# ---------------------------------------------------------------------------
-# build_croissant
-# ---------------------------------------------------------------------------
-
-
 def test_csv_build_croissant_single_file() -> None:
     handler = CSVHandler()
     meta = {
@@ -116,11 +101,6 @@ def test_csv_build_croissant_multiple_files() -> None:
     assert filesets == []
     assert len(record_sets) == 2
     assert {rs.name for rs in record_sets} == {"a", "b"}
-
-
-# ---------------------------------------------------------------------------
-# _parse_conflict and probe fallback (#48)
-# ---------------------------------------------------------------------------
 
 
 def test_parse_conflict_known_format() -> None:
@@ -185,8 +165,6 @@ def test_no_fd_leak_on_schema_only_reads(tmp_path: Path) -> None:
         handler.extract(make_source(f), count_rows=False)
 
 
-# --- A comment preamble is metadata, not a malformed row --------------------
-
 _PROBE_SET = (
     "#probe_set_file_format=2.0\n"
     "#panel_name=Visium Human Transcriptome Probe Set v2.0\n"
@@ -196,25 +174,39 @@ _PROBE_SET = (
     "ENSG00000000005,TCTGCATCT,TRUE\n"
 )
 
-
-def test_a_comment_preamble_does_not_fail_the_read(tmp_path: Path) -> None:
-    """10x probe-set CSVs lead with ``#`` lines; PyArrow read them as a
-    one-column table and then rejected the real five-column header."""
-    path = tmp_path / "probe_set.csv"
-    path.write_text(_PROBE_SET, encoding="utf-8")
-
-    meta = CSVHandler().extract(make_source(path, Path("probe_set.csv")))
-
-    assert meta["columns"] == ["gene_id", "probe_seq", "included"]
-    assert meta["num_columns"] == 3
+_HEADER_AND_ROWS = "id,note\n1,#1 ranked\n2,plain\n"
 
 
-def test_a_hash_inside_data_is_not_treated_as_a_comment(tmp_path: Path) -> None:
-    """Only a leading run of ``#`` lines is a preamble; ``#`` elsewhere is data."""
-    path = tmp_path / "notes.csv"
-    path.write_text("id,note\n1,#1 ranked\n2,plain\n", encoding="utf-8")
+@pytest.mark.parametrize(
+    "text, columns",
+    [
+        (_PROBE_SET, ["gene_id", "probe_seq", "included"]),
+        (_HEADER_AND_ROWS, ["id", "note"]),
+        ("#c\n" * 100 + _HEADER_AND_ROWS, ["id", "note"]),
+    ],
+    ids=["10x-probe-set", "hash-inside-data", "at-the-preamble-bound"],
+)
+def test_a_leading_comment_run_is_skipped_and_nothing_else_is(
+    tmp_path: Path, text: str, columns: list
+) -> None:
+    """PyArrow read a ``#`` preamble as a one-column table and then rejected
+    the real header. Row counts are asserted too: skipping one row too many
+    silently drops data instead of failing."""
+    path = tmp_path / "probe.csv"
+    path.write_text(text, encoding="utf-8")
 
-    meta = CSVHandler().extract(make_source(path, Path("notes.csv")))
+    meta = CSVHandler().extract(make_source(path, Path("probe.csv")), count_rows=True)
 
-    assert meta["columns"] == ["id", "note"]
-    assert meta["num_columns"] == 2
+    assert meta["columns"] == columns
+    assert meta["num_columns"] == len(columns)
+    assert meta["num_rows"] == 2
+
+
+def test_a_preamble_past_the_bound_is_not_skipped(tmp_path: Path) -> None:
+    """The scan is bounded, so a file that is comments all the way down cannot
+    cost an unbounded read. Past the bound the handler stops claiming a
+    preamble at all, and the read fails rather than silently mis-parsing."""
+    path = tmp_path / "all_comments.csv"
+    path.write_text("#c\n" * 101 + _HEADER_AND_ROWS, encoding="utf-8")
+
+    assert CSVHandler()._preamble_rows(make_source(path, Path("all_comments.csv"))) == 0

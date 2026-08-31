@@ -8,6 +8,8 @@ import pytest
 
 from croissant_baker import compression
 from croissant_baker.handlers.base_handler import (
+    BuildResult,
+    Declined,
     FileTypeHandler,
     InputKind,
     uses_legacy_claims,
@@ -49,11 +51,6 @@ def probe_name(name: str) -> str:
     return f"probe{HANDLERS[name].EXTENSIONS[0]}"
 
 
-# --------------------------------------------------------------------------
-# The sample table must keep up with the registry
-# --------------------------------------------------------------------------
-
-
 def test_every_handler_has_a_sample_or_a_recorded_exemption() -> None:
     """Adding a handler without test data fails here, not silently in the wild."""
     missing = [n for n in NAMES if n not in SAMPLES and n not in EXEMPT]
@@ -69,11 +66,6 @@ def test_only_non_stream_handlers_are_exempt() -> None:
         assert HANDLERS[name].INPUT_KIND is not InputKind.STREAM, (
             f"{name} reads a stream, so it has no excuse for an exemption"
         )
-
-
-# --------------------------------------------------------------------------
-# Claiming
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("suffix", ["", *WRAPPER_SUFFIXES])
@@ -115,11 +107,6 @@ def test_selection_routes_a_file_back_to_its_own_handler(
     assert type(selection.handler).__name__ == name
 
 
-# --------------------------------------------------------------------------
-# Failing
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("name", NAMES)
 def test_a_missing_file_raises_file_not_found(name: str, tmp_path: Path) -> None:
     """One contract, so the pipeline reports one reason category."""
@@ -146,11 +133,6 @@ def test_garbage_bytes_raise_a_value_error_naming_the_file(
     )
 
 
-# --------------------------------------------------------------------------
-# Declarations
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("name", NAMES)
 def test_extensions_are_declared_and_carry_no_wrapper(name: str) -> None:
     handler = HANDLERS[name]
@@ -171,23 +153,37 @@ def test_no_builtin_is_still_on_the_legacy_contract(name: str) -> None:
     assert not uses_legacy_extract(handler), f"{name} still implements extract_metadata"
 
 
-# --------------------------------------------------------------------------
-# One result shape, whatever the handler chose to describe
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("name", NAMES)
-def test_every_handler_returns_a_build_result(name: str) -> None:
-    """Not a 2-tuple from eight handlers and a 3-tuple from one. A caller
-    reads ``.file_sets`` / ``.record_sets`` / ``.declined`` without sniffing."""
-    from croissant_baker.handlers.base_handler import BuildResult
-
+def test_an_empty_batch_describes_nothing(name: str) -> None:
+    """A guard that returned a node built from no files would be worse than
+    the KeyError it replaced."""
     result = HANDLERS[name].build_croissant([], [])
 
     assert isinstance(result, BuildResult)
-    assert isinstance(result.file_sets, list)
-    assert isinstance(result.record_sets, list)
+    assert result.file_sets == []
+    assert result.record_sets == []
     assert result.declined == ()
+
+
+@pytest.mark.parametrize("name", SAMPLED)
+def test_a_real_batch_returns_a_build_result(name: str, dataset: Path) -> None:
+    """Not a 2-tuple from eight handlers and a 3-tuple from one. The empty
+    batch above is a guard; this is the path a bake actually takes."""
+    handler = HANDLERS[name]
+    metas, ids = [], []
+    for i, (filename, payload) in enumerate(SAMPLES[name]()):
+        path = write_wrapped(dataset, filename, payload)
+        meta = handler.extract(source_for(handler, path, Path(filename)))
+        # The generator stamps this after extraction; build_croissant needs it.
+        meta["relative_path"] = filename
+        metas.append(meta)
+        ids.append(f"file_{i}")
+
+    result = handler.build_croissant(metas, ids)
+
+    assert isinstance(result, BuildResult)
+    assert result.record_sets or result.file_sets, f"{name} described nothing"
+    assert all(isinstance(d, Declined) for d in result.declined)
 
 
 def test_a_build_result_still_unpacks_as_a_pair() -> None:
@@ -207,10 +203,10 @@ def test_a_build_result_still_unpacks_as_a_pair() -> None:
     ],
 )
 def test_a_legacy_tuple_return_is_accepted(returned) -> None:
-    """Criterion 8: a handler written against the old contract keeps working."""
+    """A handler written against the old contract keeps working."""
     from croissant_baker.handlers.base_handler import BuildResult
 
-    result = BuildResult.coerce(returned)
+    result = BuildResult.coerce(returned, 0)
 
     assert result.file_sets == ["fs"] and result.record_sets == ["rs"]
     assert result.declined == ()
@@ -231,21 +227,16 @@ def test_a_malformed_return_is_refused_by_coercion(returned) -> None:
     from croissant_baker.handlers.base_handler import BuildResult
 
     with pytest.raises((TypeError, ValueError)):
-        BuildResult.coerce(returned)
+        BuildResult.coerce(returned, 1)
 
 
 def test_declined_entries_are_typed() -> None:
     from croissant_baker.handlers.base_handler import BuildResult, Declined
     from croissant_baker.scan import Reason
 
-    result = BuildResult.coerce(([], [], [(2, Reason.BUILD_FAILED, "why")]))
+    result = BuildResult.coerce(([], [], [(2, Reason.BUILD_FAILED, "why")]), 3)
 
     assert result.declined == (Declined(2, Reason.BUILD_FAILED, "why"),)
-
-
-# --------------------------------------------------------------------------
-# The public import surface survives the module layout
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(

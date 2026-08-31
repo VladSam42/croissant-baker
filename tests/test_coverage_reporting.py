@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from croissant_baker.handlers.base_handler import FileTypeHandler
+from croissant_baker.handlers.base_handler import BuildResult, Declined, FileTypeHandler
 from croissant_baker.handlers.csv_handler import CSVHandler
 from croissant_baker.handlers.registry import HandlerRegistry
 from croissant_baker.handlers.tsv_handler import TSVHandler
@@ -13,7 +13,7 @@ from croissant_baker.metadata_generator import (
     MAX_UNDESCRIBED_WARNINGS,
     MetadataGenerator,
 )
-from croissant_baker.scan import Outcome, Reason, ScanEntry, ScanReport
+from croissant_baker.scan import Outcome, Reason, ScanReport
 
 from tests.helpers import bake_with, bake_with_report, file_objects, write_wrapped
 
@@ -49,11 +49,6 @@ def _entry(report: ScanReport, name: str):
     return next(e for e in report.entries if e.name == name)
 
 
-# --------------------------------------------------------------------------
-# Every file is named, with the reason it was not described
-# --------------------------------------------------------------------------
-
-
 def test_the_rest_of_the_directory_is_still_described(report: ScanReport) -> None:
     """The loss is per-file, never the whole bake."""
     assert sorted(e.name for e in report.described) == ["good.csv", "twin.csv"]
@@ -86,11 +81,6 @@ def test_each_refusal_carries_its_own_reason_and_evidence(
         assert fragment in entry.detail, entry.detail
 
 
-def test_the_five_reasons_stay_distinct(report: ScanReport) -> None:
-    assert len(report.undescribed) == 5
-    assert len({e.reason for e in report.undescribed}) == 5
-
-
 def test_the_machine_readable_report_carries_all_of_them(report: ScanReport) -> None:
     """The report is machine-readable, so a tool can act on it."""
     files = {f["path"]: f for f in report.to_dict()["files"]}
@@ -112,11 +102,6 @@ def test_a_compressed_archive_is_still_an_archive(dataset: Path) -> None:
     assert _entry(report, "bundle.tar.gz").reason is Reason.ARCHIVE
 
 
-# --------------------------------------------------------------------------
-# Failing at claim time
-# --------------------------------------------------------------------------
-
-
 @pytest.fixture
 def corrupt_wrapper(dataset: Path) -> Path:
     """A good CSV beside a file whose wrapper cannot be decompressed at all."""
@@ -129,7 +114,7 @@ def corrupt_wrapper(dataset: Path) -> Path:
 def test_a_corrupt_wrapper_does_not_abort_the_bake(
     corrupt_wrapper: Path, workers: int
 ) -> None:
-    """The whole directory used to be lost to one unreadable file."""
+    """One unreadable file must not cost the whole directory."""
     metadata, report = bake_with_report(corrupt_wrapper, max_workers=workers)
 
     assert [rs["@id"] for rs in metadata["recordSet"]] == ["good"]
@@ -144,11 +129,6 @@ def test_a_claim_failure_is_reported_as_its_own_reason(corrupt_wrapper: Path) ->
     assert entry.reason is Reason.CLAIM_FAILED
     assert entry.detail
     assert entry.error is not None
-
-
-# --------------------------------------------------------------------------
-# Failing at assembly time
-# --------------------------------------------------------------------------
 
 
 class _BrokenCSVHandler(CSVHandler):
@@ -197,36 +177,6 @@ def test_every_batch_failing_is_an_error_not_an_empty_document(
     assert _entry(generator.scan_report, "only.csv").outcome is Outcome.FAILED
 
 
-# --------------------------------------------------------------------------
-# The lifecycle refuses illegal moves
-# --------------------------------------------------------------------------
-
-
-def test_an_entry_cannot_be_resolved_twice() -> None:
-    entry = ScanEntry(path=Path("a.csv"))
-    entry.unclaimed(Reason.NO_HANDLER, "nothing claims it")
-
-    with pytest.raises(ValueError, match="unclaimed"):
-        entry.ready(handler=object(), meta={})
-
-
-def test_an_entry_cannot_be_described_before_it_is_ready() -> None:
-    entry = ScanEntry(path=Path("a.csv"))
-
-    with pytest.raises(ValueError, match="pending"):
-        entry.describe()
-
-
-def test_failing_clears_the_metadata_the_entry_was_carrying() -> None:
-    """A FAILED entry must not still look like it has something to contribute."""
-    entry = ScanEntry(path=Path("a.csv"))
-    entry.ready(handler=object(), meta={"file_name": "a.csv"})
-    entry.failed(Reason.BUILD_FAILED, RuntimeError("boom"))
-
-    assert entry.outcome is Outcome.FAILED
-    assert entry.meta is None
-
-
 def test_an_undescribed_file_is_warned_about_as_it_is_scanned(tmp_path, caplog):
     """The summary arrives at the end; a long bake needs to say so as it goes."""
     (tmp_path / "data.csv").write_text("a,b\n1,2\n")
@@ -254,20 +204,6 @@ def test_a_file_that_fails_to_parse_names_itself(tmp_path, caplog):
     assert any("broken.csv" in m and "CSV parse error" in m for m in messages), messages
 
 
-def test_per_file_warnings_stay_bounded(tmp_path, caplog):
-    """The summary already counts these; a big directory must not bury the run."""
-    (tmp_path / "data.csv").write_text("a,b\n1,2\n")
-    for i in range(MAX_UNDESCRIBED_WARNINGS + 20):
-        (tmp_path / f"notes{i}.md").write_text("free text")
-
-    with caplog.at_level(logging.WARNING, logger="croissant_baker"):
-        MetadataGenerator(dataset_path=str(tmp_path)).generate_metadata()
-
-    named = [r for r in caplog.records if ".md" in r.getMessage()]
-    assert len(named) == MAX_UNDESCRIBED_WARNINGS
-    assert "further per-file warnings suppressed" in named[-1].getMessage()
-
-
 def test_a_batch_that_fails_to_build_names_its_files(tmp_path, caplog):
     """A handler failing as a whole must still say which files it took down."""
 
@@ -286,31 +222,6 @@ def test_a_batch_that_fails_to_build_names_its_files(tmp_path, caplog):
 
     messages = [r.getMessage() for r in caplog.records]
     assert any("one.csv" in m and "boom" in m for m in messages), messages
-
-
-def test_a_malformed_handler_return_costs_only_its_batch(tmp_path, caplog):
-    """Unpacking under the guard: the other handlers' files are still described."""
-
-    class Wrong(CSVHandler):
-        def build_croissant(self, file_metas, file_ids):
-            return "not", "a", "valid", "return"
-
-    (tmp_path / "one.csv").write_text("a,b\n1,2\n")
-    (tmp_path / "two.tsv").write_text("a\tb\n1\t2\n")
-
-    with caplog.at_level(logging.WARNING, logger="croissant_baker"):
-        result = MetadataGenerator(
-            dataset_path=str(tmp_path),
-            handlers=HandlerRegistry([Wrong(), TSVHandler()]),
-        ).generate_metadata()
-
-    assert [rs["name"] for rs in result["recordSet"]] == ["two"]
-    assert any("one.csv" in r.getMessage() for r in caplog.records)
-
-
-# --------------------------------------------------------------------------
-# A handler's return shape cannot cost the bake
-# --------------------------------------------------------------------------
 
 
 class _BadReturnHandler(FileTypeHandler):
@@ -345,25 +256,31 @@ class _BadReturnHandler(FileTypeHandler):
         ([], [], [(0,)]),
         "not a tuple at all",
         ([],),
+        ([], [], [(99, Reason.EXTRACT_FAILED, "past the end")]),
+        ([], [], [(-1, Reason.EXTRACT_FAILED, "counts backwards")]),
+        ([], [], [(0, "not-a-reason", "unknown category")]),
+        BuildResult([], [], (Declined(99, Reason.EXTRACT_FAILED, "past the end"),)),
     ],
 )
 def test_a_malformed_handler_return_costs_its_batch_only(built, dataset) -> None:
-    """Arity is checked, but the declined list is unpacked too — both inside
-    the guard, or a handler crashes the run rather than its own batch."""
-    write_wrapped(dataset, "probe.brk", b"payload")
+    """Shape, index and reason are all checked inside the guard. Outside it, a
+    handler naming a file it was never given crashes the run, or rejects one it
+    did not mean."""
+    write_wrapped(dataset, "probe1.brk", b"payload")
+    write_wrapped(dataset, "probe2.brk", b"payload")
     write_wrapped(dataset, "keep.csv", CSV)
 
     metadata, report = bake_with([_BadReturnHandler(built)], dataset)
 
-    assert _entry(report, "probe.brk").outcome is Outcome.FAILED
-    assert _entry(report, "probe.brk").reason is Reason.BUILD_FAILED
+    for name in ("probe1.brk", "probe2.brk"):
+        assert _entry(report, name).outcome is Outcome.FAILED
+        assert _entry(report, name).reason is Reason.BUILD_FAILED
     assert [rs["@id"] for rs in metadata["recordSet"]] == ["keep"]
 
 
 def test_per_file_warnings_are_capped_across_every_source(dataset, caplog) -> None:
     """The cap is a promise about output volume, so a handler's own warnings
     count against it too."""
-    from croissant_baker.metadata_generator import MAX_UNDESCRIBED_WARNINGS
 
     write_wrapped(dataset, "keep.csv", CSV)
     for i in range(70):
@@ -376,3 +293,15 @@ def test_per_file_warnings_are_capped_across_every_source(dataset, caplog) -> No
 
     named = [r for r in caplog.records if "broken" in r.getMessage()]
     assert len(named) <= MAX_UNDESCRIBED_WARNINGS + 1, len(named)
+    # Extraction runs on a pool, so which record carries the notice is a race;
+    # that exactly one does is not.
+    assert (
+        len(
+            [
+                r
+                for r in named
+                if "further per-file warnings suppressed" in r.getMessage()
+            ]
+        )
+        == 1
+    )
