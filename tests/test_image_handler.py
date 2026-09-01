@@ -266,6 +266,63 @@ def test_a_wrapped_bigtiff_is_read_through_the_wrapper(
 
 
 # --------------------------------------------------------------------------
+# Which backend reads a TIFF
+# --------------------------------------------------------------------------
+
+PLAIN_TIFF = tiff_bytes()
+
+
+def test_a_tiff_is_read_through_tifffile_and_not_pillow(
+    handler: ImageHandler, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pillow is a display library that happens to open TIFFs: it reports one
+    band for a three-channel image, and decodes tag 270 as latin-1, so ``µm``
+    comes back mojibake. tifffile is the reference reader and the only one that
+    exposes the OME header at all."""
+    from croissant_baker.handlers import image_handler as module
+
+    def fail(_source):
+        raise AssertionError("a TIFF was read through Pillow")
+
+    monkeypatch.setattr(module, "_read_with_pillow", fail)
+    path = tmp_path / "scan.tif"
+    path.write_bytes(PLAIN_TIFF)
+
+    props = handler.extract(make_source(path))["image_properties"]
+
+    assert props["image_format"] == "TIFF"
+
+
+def test_a_png_is_still_read_through_pillow(
+    handler: ImageHandler, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the TIFF extensions move. Nothing else changes backend."""
+    from croissant_baker.handlers import image_handler as module
+
+    def fail(_source):
+        raise AssertionError("a PNG was read through tifffile")
+
+    monkeypatch.setattr(module, "_read_with_tifffile", fail)
+    path = tmp_path / "pixel.png"
+    path.write_bytes(PNG_1X1)
+
+    assert handler.extract(make_source(path))["image_properties"]["width"] == 1
+
+
+def test_an_unreadable_tiff_raises_a_value_error_naming_the_file(
+    handler: ImageHandler, tmp_path: Path
+) -> None:
+    """The message becomes the reason detail a user reads in ``--report``. The
+    shared garbage-bytes sweep writes this handler's first sample name, which
+    is a PNG, so a broken TIFF is only covered here."""
+    path = tmp_path / "truncated.tif"
+    path.write_bytes(BIGTIFF[:20])
+
+    with pytest.raises(ValueError, match="truncated.tif"):
+        handler.extract(make_source(path))
+
+
+# --------------------------------------------------------------------------
 # The batch summary
 # --------------------------------------------------------------------------
 

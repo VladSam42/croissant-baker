@@ -167,23 +167,17 @@ def _read_with_tifffile(source: FileSource) -> Dict:
 
 
 def _read_image_metadata(source: FileSource) -> Dict:
-    """
-    Read image dimensions and band count, choosing the right backend.
+    """Read image dimensions and band count, through the backend for the format.
 
-    Tries Pillow first for standard formats. Falls back to tifffile for
-    multi-band TIFFs that Pillow cannot decode (e.g., 12-band Sentinel-2).
+    tifffile is the reference TIFF reader in the scientific Python stack;
+    Pillow is a display library that happens to open TIFFs. Pillow reports one
+    band for a three-channel image because that is Pillow's model of a TIFF,
+    decodes tag 270 as latin-1 so ``µm`` comes back mojibake, and opens none of
+    the twelve-band rasters this repository already carries. So TIFF is read
+    through tifffile alone, and every other extension keeps Pillow.
     """
-    if source.suffix in _PILLOW_EXTENSIONS:
-        return _read_with_pillow(source)
-
-    # For TIFF files, try Pillow first (works for standard 1/3/4-band TIFFs),
-    # then fall back to tifffile for multi-band scientific imagery.
     if source.suffix in _TIFF_EXTENSIONS:
-        try:
-            return _read_with_pillow(source)
-        except Exception:
-            return _read_with_tifffile(source)
-
+        return _read_with_tifffile(source)
     return _read_with_pillow(source)
 
 
