@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import numpy as np
@@ -16,11 +17,14 @@ from croissant_baker.handlers.image_handler import (
     collect_image_summary,
 )
 from croissant_baker.handlers.registry import builtin_handlers
-from croissant_baker.sources import make_source
+from croissant_baker.sources import FileSource, make_source
 
 from tests.helpers import (
+    OME_TIFF,
     PNG_1X1,
     WRAPPER_SUFFIXES,
+    ome_image,
+    ome_xml,
     tiff_bytes,
     write_wrapped,
 )
@@ -320,6 +324,99 @@ def test_an_unreadable_tiff_raises_a_value_error_naming_the_file(
 
     with pytest.raises(ValueError, match="truncated.tif"):
         handler.extract(make_source(path))
+
+
+# --------------------------------------------------------------------------
+# No pixel data, at any size
+# --------------------------------------------------------------------------
+
+TILED_OME = tiff_bytes(ome_xml(ome_image()), planes=4, size=64, tile=(16, 16))
+
+
+class ReadLog(io.BytesIO):
+    """A stream that records the byte interval of every read it serves."""
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__(data)
+        self.intervals: list = []
+        self.back_seeks = 0
+
+    def read(self, size=-1):
+        start = self.tell()
+        chunk = super().read(size)
+        self.intervals.append((start, start + len(chunk)))
+        return chunk
+
+    def seek(self, offset, whence=0):
+        before = self.tell()
+        position = super().seek(offset, whence)
+        if position < before:
+            self.back_seeks += 1
+        return position
+
+
+def pixel_intervals(data: bytes) -> list:
+    """Where the pixels are, from the offsets and byte counts the TIFF declares."""
+    out = []
+    with tifffile.TiffFile(io.BytesIO(data)) as tif:
+        for page in tif.pages:
+            tags = page.tags
+            offsets = tags.get("TileOffsets") or tags.get("StripOffsets")
+            counts = tags.get("TileByteCounts") or tags.get("StripByteCounts")
+            out += [(o, o + c) for o, c in zip(offsets.value, counts.value) if c]
+    return out
+
+
+def test_describing_a_tiled_ome_tiff_reads_no_pixel_data(
+    handler: ImageHandler,
+) -> None:
+    """A byte cap would be the wrong assertion — the pull scales with the
+    ImageDescription and the IFD count, so 8 KiB holds for 3 channels and
+    breaches at 40. What must hold at every size is that no read overlaps a
+    pixel interval, which a read starting earlier and spanning into one would
+    otherwise satisfy."""
+    log = ReadLog(TILED_OME)
+    source = FileSource(
+        name="tiled.ome.tif",
+        relative_path=Path("tiled.ome.tif"),
+        size=len(TILED_OME),
+        exists=True,
+        _open_binary=lambda: log,
+        _digest=lambda: "0" * 64,
+    )
+
+    handler.extract(source)
+
+    assert log.intervals, "nothing was read at all, so the check proves nothing"
+    pixels = pixel_intervals(TILED_OME)
+    assert pixels, "the fixture declares no pixel data to avoid"
+    overlaps = [
+        (read, pixel)
+        for read in log.intervals
+        for pixel in pixels
+        if read[0] < pixel[1] and pixel[0] < read[1]
+    ]
+    assert not overlaps, overlaps
+    # A backward seek on a wrapped file costs a decompression from offset 0.
+    assert log.back_seeks <= 3, log.back_seeks
+
+
+# --------------------------------------------------------------------------
+# The OME header
+# --------------------------------------------------------------------------
+def test_an_ome_tiff_keeps_its_tiff_tags_alongside_its_header(
+    handler: ImageHandler, tmp_path: Path
+) -> None:
+    """``num_bands`` is TIFF SamplesPerPixel and stays so. It is genuinely 1 for
+    a three-channel OME stored as three IFDs, and ``size_c`` is the channel
+    count — reporting one of them as the other would lose both."""
+    path = tmp_path / "morphology.ome.tif"
+    path.write_bytes(OME_TIFF)
+
+    meta = handler.extract(make_source(path))
+
+    assert meta["image_properties"]["num_bands"] == 1
+    assert meta["ome"].size_c == 3
 
 
 # --------------------------------------------------------------------------

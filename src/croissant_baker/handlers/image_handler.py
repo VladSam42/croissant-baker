@@ -6,6 +6,7 @@ from typing import Dict, List
 
 import mlcroissant as mlc
 
+from croissant_baker.handlers import ome
 from croissant_baker.handlers.base_handler import BuildResult, FileTypeHandler
 from croissant_baker.sources import FileSource
 
@@ -126,11 +127,12 @@ def _read_with_pillow(source: FileSource) -> Dict:
 
 
 def _read_with_tifffile(source: FileSource) -> Dict:
-    """Read image metadata using tifffile (multi-band / scientific TIFFs)."""
+    """Read TIFF metadata, and the OME-XML header if the file carries one."""
     import tifffile
 
     with source.open() as stream, tifffile.TiffFile(stream) as tif:
         page = tif.pages[0]
+        header = ome.read(tif)
         # Prefer the TIFF tags, which describe the logical image dimensions
         # directly and are not affected by planar storage order.
         width = getattr(page, "imagewidth", None)
@@ -162,7 +164,10 @@ def _read_with_tifffile(source: FileSource) -> Dict:
             "width": int(width),
             "height": int(height),
             "num_bands": int(num_bands),
+            # BigTIFF is a TIFF variant, and a second token here would add one
+            # to the format breakdown that no consumer expects.
             "image_format": "TIFF",
+            "ome": header,
         }
 
 
@@ -222,7 +227,7 @@ class ImageHandler(FileTypeHandler):
 
         mime_type = _MIME_TYPES.get(source.suffix, "application/octet-stream")
 
-        return {
+        meta = {
             "file_name": source.name,
             "file_size": source.size,
             "sha256": source.sha256,
@@ -234,6 +239,9 @@ class ImageHandler(FileTypeHandler):
                 "image_format": img_meta["image_format"],
             },
         }
+        if img_meta.get("ome") is not None:
+            meta["ome"] = img_meta["ome"]
+        return meta
 
     def build_croissant(self, file_metas: list, file_ids: list) -> tuple:
         # An empty batch has nothing to summarise; emitting a FileSet over
