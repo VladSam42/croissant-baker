@@ -23,14 +23,21 @@ def _handlers():
     return get_registered_handlers()
 
 
-def _formats(metadata: dict) -> list:
-    """The media types on each FileObject, in document order."""
-    out = []
+def _formats(metadata: dict) -> dict:
+    """The media types on each FileObject, keyed by the file's logical name.
+
+    Keyed rather than positional: the scan follows rglob order, which differs
+    between two freshly created directories, so a handler whose sample holds
+    two media types would otherwise compare a PNG against a TIFF.
+    """
+    out = {}
     for node in metadata.get("distribution", []):
         if node.get("@type") != "cr:FileObject":
             continue
         value = node.get("encodingFormat")
-        out.append(value if isinstance(value, list) else [value])
+        out[compression.logical_name(node["name"])] = (
+            value if isinstance(value, list) else [value]
+        )
     return out
 
 
@@ -128,7 +135,9 @@ def test_wrapped_is_described_like_plain(
     expected = _formats(plain)
     if suffix:
         wrapper = next(c for c in compression.compressions() if c.suffix == suffix)
-        expected = [formats + [wrapper.media_type] for formats in expected]
+        expected = {
+            name: formats + [wrapper.media_type] for name, formats in expected.items()
+        }
     assert _formats(wrapped) == expected, (
         f"{handler_name}: {suffix} reported {_formats(wrapped)}"
     )
