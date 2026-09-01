@@ -23,6 +23,7 @@ from tests.helpers import (
     OME_TIFF,
     PNG_1X1,
     WRAPPER_SUFFIXES,
+    ome_bomb,
     ome_image,
     ome_xml,
     tiff_bytes,
@@ -417,6 +418,332 @@ def test_an_ome_tiff_keeps_its_tiff_tags_alongside_its_header(
 
     assert meta["image_properties"]["num_bands"] == 1
     assert meta["ome"].size_c == 3
+
+
+# --------------------------------------------------------------------------
+# The OME collection
+# --------------------------------------------------------------------------
+
+IMAGEJ_TIFF = tiff_bytes("ImageJ=1.53t\nimages=1\nslices=1\n")
+BOMB_TIFF = tiff_bytes(ome_bomb())
+BINARY_ONLY_TIFF = tiff_bytes(
+    ome_xml('<BinaryOnly UUID="urn:uuid:9c1b" FileName="plate.companion.ome"/>')
+)
+OME_40 = tiff_bytes(
+    ome_xml(
+        ome_image(
+            pixels='DimensionOrder="XYCZT" Type="uint8" SizeX="8" SizeY="8"'
+            ' SizeC="40" SizeZ="1" SizeT="1"',
+            channels=("CD3", "CD8"),
+        )
+    )
+)
+OME_NO_PHYSICAL_SIZE = tiff_bytes(
+    ome_xml(
+        ome_image(
+            pixels='DimensionOrder="XYCZT" Type="uint16" SizeX="8" SizeY="8"'
+            ' SizeC="3" SizeZ="1" SizeT="1"'
+        )
+    )
+)
+OME_TWO_IMAGES = tiff_bytes(
+    ome_xml(ome_image() + ome_image(identifier="Image:1", channels=("CD3",)))
+)
+OME_NAMED = tiff_bytes(
+    ome_xml(
+        ome_image(attrs=' Name="Patient 3 slide 2"'),
+        attrs=' UUID="urn:uuid:9c1bde0e-dead-beef" Creator="Acme Scanner 4.2"',
+    )
+)
+
+
+def ome_partner(other: str) -> bytes:
+    """One file of a multi-file OME set, naming its partner the way OME does."""
+    return tiff_bytes(
+        ome_xml(
+            ome_image(
+                trailing=f'<TiffData IFD="0"><UUID FileName="{other}">'
+                "urn:uuid:9c1b</UUID></TiffData>"
+            )
+        )
+    )
+
+
+def described(handler: ImageHandler, directory: Path, files: dict) -> tuple:
+    """Write ``files``, extract each, and stamp what the generator stamps."""
+    metas = []
+    for name, payload in files.items():
+        path = directory / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        meta = handler.extract(make_source(path, Path(name)))
+        meta["relative_path"] = name
+        metas.append(meta)
+    return metas, [f"file_{i}" for i in range(len(metas))]
+
+
+def build(handler: ImageHandler, directory: Path, files: dict):
+    return handler.build_croissant(*described(handler, directory, files))
+
+
+def nodes_by_name(nodes) -> dict:
+    return {node.name: node for node in nodes}
+
+
+def fields_of(record_set) -> dict:
+    return {field["name"]: field for field in record_set.to_json().get("field", [])}
+
+
+def as_json(result) -> str:
+    """Everything the handler contributes to the document, as one string."""
+    import json
+
+    return json.dumps(
+        [node.to_json() for node in (*result.file_sets, *result.record_sets)],
+        ensure_ascii=False,
+    )
+
+
+def test_a_batch_with_no_ome_file_describes_one_collection(
+    handler: ImageHandler, dataset: Path
+) -> None:
+    """The gate on every corpus already committed: no OME file, no change."""
+    result = build(
+        handler, dataset, {"a.png": PNG_1X1, "b.tif": PLAIN_TIFF, "c.btf": BIGTIFF}
+    )
+
+    assert [fs.id for fs in result.file_sets] == ["image-files"]
+    assert [rs.name for rs in result.record_sets] == ["images"]
+    assert sorted(result.file_sets[0].includes) == ["**/*.btf", "**/*.png", "**/*.tif"]
+
+
+def test_ome_files_are_described_as_their_own_collection(
+    handler: ImageHandler, dataset: Path
+) -> None:
+    """One handler covers nine extensions, so ten OME fields on the shared
+    record set would attribute a pixel size to every PNG beside them."""
+    result = build(handler, dataset, {"a.ome.tif": OME_TIFF, "b.png": PNG_1X1})
+
+    record_sets = nodes_by_name(result.record_sets)
+    assert sorted(record_sets) == ["images", "ome_images"]
+    assert sorted(fs.id for fs in result.file_sets) == [
+        "image-files",
+        "ome-image-files",
+    ]
+    assert list(fields_of(record_sets["images"])) == ["image"]
+    assert nodes_by_name(result.file_sets)["OME-TIFF files"].includes == ["a.ome.tif"]
+
+
+def test_the_ome_file_set_lists_its_files_rather_than_globbing(
+    handler: ImageHandler, dataset: Path
+) -> None:
+    """A ``**/*.tif`` glob would re-admit the plain TIFF beside it."""
+    result = build(handler, dataset, {"a.ome.tif": OME_TIFF, "plain.tif": PLAIN_TIFF})
+
+    ome_files = nodes_by_name(result.file_sets)["OME-TIFF files"]
+    assert ome_files.includes == ["a.ome.tif"]
+    assert not any("*" in pattern for pattern in ome_files.includes)
+
+
+def resolve(includes, directory: Path) -> set:
+    found = set()
+    for pattern in includes:
+        if "*" in pattern:
+            found |= {str(p.relative_to(directory)) for p in directory.glob(pattern)}
+        else:
+            found.add(pattern)
+    return found
+
+
+def test_the_two_collections_partition_the_batch(
+    handler: ImageHandler, dataset: Path
+) -> None:
+    """``images`` is an existing public record set and the OME files leave it,
+    so a consumer reading only ``images`` stops seeing them. Every image must
+    still be in exactly one collection."""
+    files = {
+        "a.ome.tif": OME_TIFF,
+        "b.ome.tif": OME_40,
+        "plain.tif": PLAIN_TIFF,
+        "photo.png": PNG_1X1,
+        "tissue.btf": BIGTIFF,
+    }
+
+    result = build(handler, dataset, files)
+
+    plain, ome_files = (
+        resolve(nodes_by_name(result.file_sets)[name].includes, dataset)
+        for name in ("Image files", "OME-TIFF files")
+    )
+    assert plain & ome_files == set()
+    assert plain | ome_files == set(files)
+    assert ome_files == {"a.ome.tif", "b.ome.tif"}
+
+
+def test_an_extension_no_ome_file_uses_keeps_its_glob(
+    handler: ImageHandler, dataset: Path
+) -> None:
+    """Listing every PNG in a photo archive beside one OME file would be a
+    FileSet the length of the dataset."""
+    result = build(handler, dataset, {"a.ome.tif": OME_TIFF, "photo.png": PNG_1X1})
+
+    assert nodes_by_name(result.file_sets)["Image files"].includes == ["**/*.png"]
+
+
+def test_every_field_is_typed_and_only_the_image_field_extracts(
+    handler: ImageHandler, dataset: Path
+) -> None:
+    """mlcroissant's ``fileProperty: content`` for ``image/tiff`` is the decoded
+    pixels, so putting that extract on ``size_c`` would ask a consumer to cast
+    an image to an integer."""
+    result = build(handler, dataset, {"a.ome.tif": OME_TIFF})
+
+    fields = fields_of(nodes_by_name(result.record_sets)["ome_images"])
+    # mlcroissant hands a dataType back as an rdflib URIRef, which does not
+    # compare equal to a plain str from the left.
+    assert str(fields["image"]["dataType"]) == "sc:ImageObject"
+    assert str(fields["size_c"]["dataType"]) == "sc:Integer"
+    assert str(fields["physical_size_x"]["dataType"]) == "sc:Float"
+    assert str(fields["dimension_order"]["dataType"]) == "sc:Text"
+    assert fields["channel_names"]["cr:isArray"] is True
+    assert fields["channel_names"]["cr:arrayShape"] == "-1"
+
+    assert fields["image"]["source"]["extract"] == {"fileProperty": "content"}
+    for name, field in fields.items():
+        assert "value" not in field, name
+        assert field["source"]["fileSet"] == {"@id": "ome-image-files"}
+        if name != "image":
+            assert "extract" not in field["source"], name
+
+
+def test_what_the_batch_observed_reaches_each_field_description(
+    handler: ImageHandler, dataset: Path
+) -> None:
+    """No ``Field.value`` anywhere: the per-file numbers stay in the files, and
+    only the aggregate over the batch reaches the document."""
+    result = build(handler, dataset, {"a.ome.tif": OME_TIFF})
+
+    fields = fields_of(nodes_by_name(result.record_sets)["ome_images"])
+    assert "3" in fields["size_c"]["description"]
+    assert "µm" in fields["physical_size_unit"]["description"]
+    assert "0.2125" in fields["physical_size_x"]["description"]
+    assert "uint16" in fields["pixel_type"]["description"]
+    assert "XYCZT" in fields["dimension_order"]["description"]
+    assert "2016-06" in fields["ome_version"]["description"]
+
+
+def test_files_that_disagree_are_reported_as_a_range(
+    handler: ImageHandler, dataset: Path
+) -> None:
+    """One shared field describes the whole batch, so one file's value would be
+    a false statement about the others."""
+    result = build(handler, dataset, {"a.ome.tif": OME_TIFF, "b.ome.tif": OME_40})
+
+    fields = fields_of(nodes_by_name(result.record_sets)["ome_images"])
+    assert "3-40" in fields["size_c"]["description"]
+    assert "uint16" in fields["pixel_type"]["description"]
+    assert "uint8" in fields["pixel_type"]["description"]
+
+
+def test_a_field_no_file_declares_is_not_emitted(
+    handler: ImageHandler, dataset: Path
+) -> None:
+    """``PhysicalSizeX`` is optional in the schema, and a field naming
+    something no file declares is noise."""
+    result = build(handler, dataset, {"a.ome.tif": OME_NO_PHYSICAL_SIZE})
+
+    fields = fields_of(nodes_by_name(result.record_sets)["ome_images"])
+    assert "physical_size_x" not in fields
+    assert "physical_size_unit" not in fields
+    assert "size_c" in fields
+
+
+def test_the_record_set_says_its_rows_are_files(
+    handler: ImageHandler, dataset: Path
+) -> None:
+    """A FileSet yields one record per file, and one OME-XML document may
+    declare several images. The count makes the gap visible instead of leaving
+    a consumer to assume rows are images."""
+    result = build(handler, dataset, {"a.ome.tif": OME_TWO_IMAGES})
+
+    record_set = nodes_by_name(result.record_sets)["ome_images"]
+    fields = fields_of(record_set)
+    assert "ome_image_count" in fields
+    assert "2" in fields["ome_image_count"]["description"]
+    assert "file" in record_set.description.lower()
+    assert "Image[0]" in record_set.description
+
+
+def test_a_multi_file_ome_set_is_counted_as_files(
+    handler: ImageHandler, dataset: Path
+) -> None:
+    """Grouping the files of one logical image is a separate change. Reporting
+    two rows for what may be one image, without saying so, is not."""
+    result = build(
+        handler,
+        dataset,
+        {"a.ome.tif": ome_partner("b.ome.tif"), "b.ome.tif": ome_partner("a.ome.tif")},
+    )
+
+    record_set = nodes_by_name(result.record_sets)["ome_images"]
+    assert "2 OME-TIFF file" in record_set.description
+    assert "Image[0]" in record_set.description
+
+
+def test_channel_names_are_the_only_vocabulary_that_reaches_the_document(
+    handler: ImageHandler, dataset: Path
+) -> None:
+    """The OME schema defines ``Channel/@Name`` as the label of an acquisition
+    channel, so it names an antibody or a fluorophore. It says nothing about
+    ``Image/@Name``, which in practice holds slide labels and operator notes."""
+    result = build(handler, dataset, {"a.ome.tif": OME_NAMED})
+
+    fields = fields_of(nodes_by_name(result.record_sets)["ome_images"])
+    channels = fields["channel_names"]["description"]
+    document = as_json(result)
+    for name in ("DAPI", "ATP1A1", "18S"):
+        assert name in channels
+        assert document.count(name) == 1, f"{name} reached a node of its own"
+    for secret in ("Patient 3 slide 2", "Acme Scanner 4.2", "9c1bde0e-dead-beef"):
+        assert secret not in document
+
+
+def test_a_refused_description_is_counted_and_never_expanded(
+    handler: ImageHandler, dataset: Path
+) -> None:
+    """A described file has nowhere else to record a partial refusal:
+    ``ScanEntry.describe()`` clears the reason and the detail."""
+    result = build(handler, dataset, {"a.ome.tif": BOMB_TIFF, "b.ome.tif": OME_TIFF})
+
+    record_set = nodes_by_name(result.record_sets)["ome_images"]
+    fields = fields_of(record_set)
+    assert "1 of 2" in record_set.description
+    assert "not parsed" in record_set.description
+    # The refused file contributed nothing, and the sound one still did.
+    assert fields["size_c"]["description"].endswith("(3)")
+    assert "lol" not in as_json(result)
+
+
+def test_an_image_j_description_leaves_the_file_a_plain_tiff(
+    handler: ImageHandler, dataset: Path
+) -> None:
+    """Tag 270 carries all sorts of things. Only OME-XML is OME."""
+    result = build(handler, dataset, {"a.tif": IMAGEJ_TIFF, "b.tif": PLAIN_TIFF})
+
+    assert [rs.name for rs in result.record_sets] == ["images"]
+    assert [fs.id for fs in result.file_sets] == ["image-files"]
+
+
+def test_a_binary_only_file_names_its_companion(
+    handler: ImageHandler, dataset: Path
+) -> None:
+    """Detected and named, not read. Opening a second file to describe the
+    first is a different change."""
+    result = build(handler, dataset, {"a.ome.tif": BINARY_ONLY_TIFF})
+
+    record_set = nodes_by_name(result.record_sets)["ome_images"]
+    assert "plate.companion.ome" in record_set.description
+    assert "size_c" not in fields_of(record_set)
 
 
 # --------------------------------------------------------------------------
