@@ -22,8 +22,11 @@ _PILLOW_EXTENSIONS = {
     ".ico",
 }
 
-# Multi-band / scientific TIFF extensions that may need tifffile.
-_TIFF_EXTENSIONS = {".tiff", ".tif"}
+# TIFF extensions, read through tifffile. ``.btf`` is BigTIFF: not a format so
+# much as classic TIFF's 64-bit offset field, which any writer switches to at
+# 4 GiB — the size whole-slide histopathology, EM volumes, geospatial rasters
+# and light-sheet stacks all cross.
+_TIFF_EXTENSIONS = {".tiff", ".tif", ".btf"}
 
 # All supported image extensions.
 SUPPORTED_EXTENSIONS = _PILLOW_EXTENSIONS | _TIFF_EXTENSIONS
@@ -39,6 +42,8 @@ _MIME_TYPES: Dict[str, str] = {
     ".ico": "image/x-icon",
     ".tiff": "image/tiff",
     ".tif": "image/tiff",
+    # BigTIFF has no registration of its own and is served as image/tiff.
+    ".btf": "image/tiff",
 }
 
 # Magic-byte signatures for every supported image extension. These are
@@ -68,6 +73,7 @@ _IMAGE_MAGIC_CHECKS = {
     ".gif": lambda h: h.startswith((b"GIF87a", b"GIF89a")),
     ".tiff": lambda h: h.startswith(_TIFF_MAGICS),
     ".tif": lambda h: h.startswith(_TIFF_MAGICS),
+    ".btf": lambda h: h.startswith(_TIFF_MAGICS),
     ".bmp": lambda h: h.startswith(b"BM"),
     ".webp": lambda h: h[:4] == b"RIFF" and h[8:12] == b"WEBP",
     ".ico": lambda h: h[:4] in (b"\x00\x00\x01\x00", b"\x00\x00\x02\x00"),
@@ -201,6 +207,7 @@ class ImageHandler(FileTypeHandler):
         ".ico",
         ".tiff",
         ".tif",
+        ".btf",
     )
     FORMAT_NAME = "Images"
     FORMAT_DESCRIPTION = "Dimensions, color mode, encoding format"

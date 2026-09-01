@@ -6,10 +6,12 @@ import base64
 import gzip
 import io
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Optional
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import tifffile
 
 from typer.testing import CliRunner
 
@@ -62,6 +64,29 @@ PNG_1X1 = base64.b64decode(
     b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQD"
     b"wAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 )
+
+
+def tiff_bytes(
+    description: Optional[str] = None, *, planes: int = 1, size: int = 8, **kwargs
+) -> bytes:
+    """A TIFF in memory, with ``description`` written verbatim to tag 270.
+
+    Encoded as UTF-8 because tag 270 is nominally 7-bit ASCII and every OME
+    writer puts ``µm`` in it regardless.
+    """
+    shape = (planes, size, size) if planes > 1 else (size, size)
+    buffer = io.BytesIO()
+    tifffile.imwrite(
+        buffer,
+        np.zeros(shape, np.uint16),
+        photometric="minisblack",
+        description=None if description is None else description.encode("utf-8"),
+        # Otherwise tifffile writes its own shape note into tag 270, and a
+        # fixture meant to carry no description carries one.
+        metadata=None,
+        **kwargs,
+    )
+    return buffer.getvalue()
 
 
 def _png() -> list:
@@ -211,6 +236,7 @@ __all__ = [
     "file_sets",
     "includes",
     "record_sets",
+    "tiff_bytes",
     "runner",
     "write_all",
     "write_wrapped",

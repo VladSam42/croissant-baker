@@ -1,17 +1,29 @@
 """Tests for image file handler."""
 
+from __future__ import annotations
+
 from pathlib import Path
 
 import numpy as np
 import pytest
 import tifffile
 
-import croissant_baker.handlers.image_handler as image_handler_module
 from croissant_baker.handlers.image_handler import (
+    _IMAGE_MAGIC_CHECKS,
+    _MIME_TYPES,
+    SUPPORTED_EXTENSIONS,
     ImageHandler,
     collect_image_summary,
 )
+from croissant_baker.handlers.registry import builtin_handlers
 from croissant_baker.sources import make_source
+
+from tests.helpers import (
+    PNG_1X1,
+    WRAPPER_SUFFIXES,
+    tiff_bytes,
+    write_wrapped,
+)
 
 
 @pytest.fixture
@@ -20,7 +32,7 @@ def handler() -> ImageHandler:
 
 
 # Minimal magic-byte stubs per supported extension. These are not full
-# images — they only need enough bytes to satisfy can_handle's check.
+# images — they only need enough bytes to satisfy claims()'s check.
 _IMAGE_STUBS = {
     ".png": b"\x89PNG\r\n\x1a\n",
     ".jpg": b"\xff\xd8\xff\xe0",
@@ -30,6 +42,7 @@ _IMAGE_STUBS = {
     ".webp": b"RIFF\x00\x00\x00\x00WEBP",
     ".tiff": b"II*\x00",
     ".tif": b"MM\x00*",
+    ".btf": b"II+\x00",
     ".ico": b"\x00\x00\x01\x00",
 }
 
@@ -48,6 +61,7 @@ _IMAGE_STUBS = {
         "satellite.tiff",
         "satellite.tif",
         "satellite.TIFF",
+        "tissue.btf",
         "image.ico",
     ],
 )
@@ -147,48 +161,113 @@ def test_extract_metadata_tiff(
     assert props["image_format"] == "TIFF"
 
 
-@pytest.fixture
-def separate_planar_tiff_path(tmp_path: Path) -> Path:
-    """Create a multi-band TIFF that forces the tifffile fallback path."""
+def test_extract_metadata_separate_planar_tiff(
+    handler: ImageHandler, tmp_path: Path
+) -> None:
+    """Regression test for TIFFs whose band axis is stored first."""
     path = tmp_path / "separate_planar.tiff"
-    data = np.zeros((12, 5, 7), dtype=np.uint8)
     tifffile.imwrite(
         str(path),
-        data,
+        np.zeros((12, 5, 7), dtype=np.uint8),
         photometric="minisblack",
         planarconfig="separate",
     )
-    return path
 
+    props = handler.extract(make_source(path))["image_properties"]
 
-def test_extract_metadata_separate_planar_tiff(
-    handler: ImageHandler,
-    separate_planar_tiff_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Regression test for TIFFs whose band axis is stored first."""
-
-    def _force_tifffile_fallback(_path: Path) -> None:
-        raise RuntimeError("force tifffile fallback")
-
-    monkeypatch.setattr(
-        image_handler_module,
-        "_read_with_pillow",
-        _force_tifffile_fallback,
-    )
-
-    meta = handler.extract(make_source(separate_planar_tiff_path))
-
-    assert meta["file_name"] == "separate_planar.tiff"
-    assert meta["encoding_format"] == "image/tiff"
-    assert meta["file_size"] > 0
-    assert len(meta["sha256"]) == 64
-
-    props = meta["image_properties"]
-    assert props["width"] == 7
-    assert props["height"] == 5
+    assert (props["width"], props["height"]) == (7, 5)
     assert props["num_bands"] == 12
     assert props["image_format"] == "TIFF"
+
+
+# --------------------------------------------------------------------------
+# BigTIFF
+# --------------------------------------------------------------------------
+
+BIGTIFF = tiff_bytes(size=16, bigtiff=True)
+
+
+def test_every_supported_extension_is_declared_typed_and_sniffed() -> None:
+    """The four tables that have to agree, and the reason BigTIFF went
+    unclaimed for so long: ``_TIFF_MAGICS`` already accepted its version byte,
+    but the magic check is keyed by extension first, and ``.btf`` was in none
+    of the tables that key it."""
+    assert set(ImageHandler.EXTENSIONS) == SUPPORTED_EXTENSIONS
+    assert set(_MIME_TYPES) == SUPPORTED_EXTENSIONS
+    assert set(_IMAGE_MAGIC_CHECKS) == SUPPORTED_EXTENSIONS
+
+
+def test_a_bigtiff_carries_the_magic_the_handler_checks_for() -> None:
+    """Guards the fixture: BigTIFF differs from classic TIFF in one version
+    byte, 0x2b against 0x2a, and a fixture written as classic TIFF would let
+    the claim below pass for the wrong reason."""
+    assert BIGTIFF[:4] == b"II+\x00"
+
+
+def test_a_bigtiff_is_claimed_and_described(
+    handler: ImageHandler, tmp_path: Path
+) -> None:
+    """Any TIFF writer switches to BigTIFF at 4 GiB, which is where whole-slide
+    imaging, EM volumes and geospatial rasters all live."""
+    path = tmp_path / "tissue.btf"
+    path.write_bytes(BIGTIFF)
+    source = make_source(path)
+
+    assert handler.claims(source) is True
+
+    props = handler.extract(source)["image_properties"]
+
+    assert (props["width"], props["height"]) == (16, 16)
+    assert props["num_bands"] == 1
+    # BigTIFF is a TIFF variant, and a second token here would land in the
+    # format breakdown that the record-set description reports.
+    assert props["image_format"] == "TIFF"
+
+
+def test_a_btf_without_bigtiff_magic_is_declined(
+    handler: ImageHandler, tmp_path: Path
+) -> None:
+    path = tmp_path / "impostor.btf"
+    path.write_bytes(PNG_1X1)
+
+    assert handler.claims(make_source(path)) is False
+
+
+@pytest.mark.parametrize(
+    "handler_name", sorted(type(h).__name__ for h in builtin_handlers())
+)
+def test_only_the_image_handler_claims_a_bigtiff(
+    handler_name: str, tmp_path: Path
+) -> None:
+    """The shared exclusive-format sweep cannot reach this: ``.btf`` resolves to
+    ImageHandler, and the sweep then writes that owner's first sample, which is
+    ``pixel.png``. So no handler is ever asked about a ``.btf`` but here."""
+    path = tmp_path / "tissue.btf"
+    path.write_bytes(BIGTIFF)
+    other = next(h for h in builtin_handlers() if type(h).__name__ == handler_name)
+
+    claimed = other.claims(make_source(path))
+
+    assert claimed is (handler_name == "ImageHandler")
+
+
+@pytest.mark.parametrize("suffix", WRAPPER_SUFFIXES)
+def test_a_wrapped_bigtiff_is_read_through_the_wrapper(
+    handler: ImageHandler, dataset: Path, suffix: str
+) -> None:
+    """tifffile seeks to the end of a BigTIFF to reach its offsets, and on a
+    compressed stream that is a decompression of the whole file. It has to
+    work, and it is the dearest read this handler does."""
+    path = write_wrapped(dataset, "tissue.btf", BIGTIFF, suffix)
+
+    props = handler.extract(make_source(path, Path("tissue.btf")))["image_properties"]
+
+    assert (props["width"], props["height"]) == (16, 16)
+
+
+# --------------------------------------------------------------------------
+# The batch summary
+# --------------------------------------------------------------------------
 
 
 def test_collect_image_summary() -> None:
