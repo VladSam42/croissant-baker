@@ -160,7 +160,9 @@ OME-TIFF is the interchange format of light microscopy: what Bio-Formats writes,
 
 Only the `image` field carries `extract: {fileProperty: content}`, because its content *is* the file's content. mlcroissant reads `image/tiff` content as the decoded pixels, so the same extract on `size_c` would ask a consumer to cast an image to an integer. Every header field is sourced `{fileSet}` and nothing more.
 
-The OME-XML is parsed with `xml.etree.ElementTree` and no new dependency. A document that declares a DTD or an entity is not parsed, and neither is one over 8 MiB; the file is still described, as a plain TIFF, and the refusal is counted in the record-set description. A `BinaryOnly` file keeps its metadata in a companion `.companion.ome` file, which is named and not read.
+The OME-XML is parsed with `xml.etree.ElementTree` and no new dependency. A document that declares a DTD or an entity is not parsed, and neither is one over 8 MiB. The file is still described, as a plain TIFF; the refusal is counted in the record-set description and logged as a warning naming the file, which is the only runtime signal, since a described file has no entry in the scan report to carry a reason.
+
+A `BinaryOnly` document is a place-holder: the schema forbids it any content beyond a pointer to a companion `.companion.ome` file. The companion is named in the description and not read, and the place-holder contributes no header fields — not even the zero images it declares, which describes the stub rather than the image the file holds.
 
 Not read: `Plane`, `Objective`, `TimeIncrement`, plate and well metadata, pyramid levels, and the vendor TIFF dialects (`.svs`, `.ndpi`, `.scn`, `.qptiff`).
 

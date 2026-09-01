@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import tifffile
 
+from croissant_baker.handlers import ome
 from croissant_baker.handlers.image_handler import (
     _IMAGE_MAGIC_CHECKS,
     _MIME_TYPES,
@@ -193,10 +194,8 @@ BIGTIFF = tiff_bytes(size=16, bigtiff=True)
 
 
 def test_every_supported_extension_is_declared_typed_and_sniffed() -> None:
-    """The four tables that have to agree, and the reason BigTIFF went
-    unclaimed for so long: ``_TIFF_MAGICS`` already accepted its version byte,
-    but the magic check is keyed by extension first, and ``.btf`` was in none
-    of the tables that key it."""
+    """``_TIFF_MAGICS`` already accepted BigTIFF's version byte. The magic check
+    is keyed by extension first, so being in three of these tables is no use."""
     assert set(ImageHandler.EXTENSIONS) == SUPPORTED_EXTENSIONS
     assert set(_MIME_TYPES) == SUPPORTED_EXTENSIONS
     assert set(_IMAGE_MAGIC_CHECKS) == SUPPORTED_EXTENSIONS
@@ -280,10 +279,8 @@ PLAIN_TIFF = tiff_bytes()
 def test_a_tiff_is_read_through_tifffile_and_not_pillow(
     handler: ImageHandler, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Pillow is a display library that happens to open TIFFs: it reports one
-    band for a three-channel image, and decodes tag 270 as latin-1, so ``µm``
-    comes back mojibake. tifffile is the reference reader and the only one that
-    exposes the OME header at all."""
+    """Pillow opens some TIFFs, and reads them worse — see
+    ``_read_image_metadata``."""
     from croissant_baker.handlers import image_handler as module
 
     def fail(_source):
@@ -371,11 +368,10 @@ def pixel_intervals(data: bytes) -> list:
 def test_describing_a_tiled_ome_tiff_reads_no_pixel_data(
     handler: ImageHandler,
 ) -> None:
-    """A byte cap would be the wrong assertion — the pull scales with the
-    ImageDescription and the IFD count, so 8 KiB holds for 3 channels and
-    breaches at 40. What must hold at every size is that no read overlaps a
-    pixel interval, which a read starting earlier and spanning into one would
-    otherwise satisfy."""
+    """A byte cap would be the wrong assertion: the pull scales with the
+    ImageDescription and the IFD count, so 8 KiB holds at 3 channels and
+    breaches at 40. Overlap, not "no read starts at a pixel offset", which a
+    read beginning earlier and spanning into one would satisfy."""
     log = ReadLog(TILED_OME)
     source = FileSource(
         name="tiled.ome.tif",
@@ -420,14 +416,64 @@ def test_an_ome_tiff_keeps_its_tiff_tags_alongside_its_header(
     assert meta["ome"].size_c == 3
 
 
+BOMB_TIFF = tiff_bytes(ome_bomb())
+
+
+@pytest.mark.parametrize(
+    ("label", "payload"),
+    [
+        ("entity declaration", BOMB_TIFF),
+        (
+            "oversized",
+            tiff_bytes(ome_xml(f"<!--{'x' * (ome.MAX_DESCRIPTION_BYTES + 1)}-->")),
+        ),
+        # Closed at the root, so tifffile still calls it OME, but not
+        # well-formed. A description truncated before ``</OME>`` is a
+        # different case: nothing identifies it as OME, so it is not refused.
+        ("malformed", tiff_bytes(ome_xml("<Image>"))),
+    ],
+)
+def test_a_refused_description_is_warned_about_once(
+    handler: ImageHandler,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    label: str,
+    payload: bytes,
+) -> None:
+    """The record-set description carries the count, but a described file has
+    no scan-report entry to hang a reason on, so this is the only runtime sign
+    that metadata was dropped."""
+    path = tmp_path / "a.ome.tif"
+    path.write_bytes(payload)
+
+    with caplog.at_level("DEBUG", logger="croissant_baker.handlers"):
+        handler.extract(make_source(path))
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1, caplog.records
+    assert "a.ome.tif" in warnings[0].getMessage()
+
+
+def test_a_sound_ome_file_is_not_warned_about(
+    handler: ImageHandler, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Or every microscopy bake would warn on every file."""
+    path = tmp_path / "a.ome.tif"
+    path.write_bytes(OME_TIFF)
+
+    with caplog.at_level("DEBUG", logger="croissant_baker.handlers"):
+        handler.extract(make_source(path))
+
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+
+
 # --------------------------------------------------------------------------
 # The OME collection
 # --------------------------------------------------------------------------
 
 IMAGEJ_TIFF = tiff_bytes("ImageJ=1.53t\nimages=1\nslices=1\n")
-BOMB_TIFF = tiff_bytes(ome_bomb())
 BINARY_ONLY_TIFF = tiff_bytes(
-    ome_xml('<BinaryOnly UUID="urn:uuid:9c1b" FileName="plate.companion.ome"/>')
+    ome_xml('<BinaryOnly UUID="urn:uuid:9c1b" MetadataFile="plate.companion.ome"/>')
 )
 OME_40 = tiff_bytes(
     ome_xml(
@@ -520,8 +566,7 @@ def test_a_batch_with_no_ome_file_describes_one_collection(
 def test_ome_files_are_described_as_their_own_collection(
     handler: ImageHandler, dataset: Path
 ) -> None:
-    """One handler covers nine extensions, so ten OME fields on the shared
-    record set would attribute a pixel size to every PNG beside them."""
+    """OME fields on the shared record set would land on every PNG beside them."""
     result = build(handler, dataset, {"a.ome.tif": OME_TIFF, "b.png": PNG_1X1})
 
     record_sets = nodes_by_name(result.record_sets)
@@ -558,9 +603,8 @@ def resolve(includes, directory: Path) -> set:
 def test_the_two_collections_partition_the_batch(
     handler: ImageHandler, dataset: Path
 ) -> None:
-    """``images`` is an existing public record set and the OME files leave it,
-    so a consumer reading only ``images`` stops seeing them. Every image must
-    still be in exactly one collection."""
+    """The OME files leave ``images``, which is an existing public record set,
+    so every image must still be in exactly one collection."""
     files = {
         "a.ome.tif": OME_TIFF,
         "b.ome.tif": OME_40,
@@ -693,8 +737,8 @@ def test_a_multi_file_ome_set_is_counted_as_files(
 def test_channel_names_are_the_only_vocabulary_that_reaches_the_document(
     handler: ImageHandler, dataset: Path
 ) -> None:
-    """The OME schema defines ``Channel/@Name`` as the label of an acquisition
-    channel, so it names an antibody or a fluorophore. It says nothing about
+    """The schema defines ``Channel/@Name`` as an acquisition channel's label,
+    so it names an antibody or a fluorophore. It says nothing about
     ``Image/@Name``, which in practice holds slide labels and operator notes."""
     result = build(handler, dataset, {"a.ome.tif": OME_NAMED})
 
@@ -711,8 +755,8 @@ def test_channel_names_are_the_only_vocabulary_that_reaches_the_document(
 def test_a_refused_description_is_counted_and_never_expanded(
     handler: ImageHandler, dataset: Path
 ) -> None:
-    """A described file has nowhere else to record a partial refusal:
-    ``ScanEntry.describe()`` clears the reason and the detail."""
+    """``ScanEntry.describe()`` clears the reason and the detail, so a described
+    file has nowhere else to record a partial refusal."""
     result = build(handler, dataset, {"a.ome.tif": BOMB_TIFF, "b.ome.tif": OME_TIFF})
 
     record_set = nodes_by_name(result.record_sets)["ome_images"]
@@ -734,16 +778,17 @@ def test_an_image_j_description_leaves_the_file_a_plain_tiff(
     assert [fs.id for fs in result.file_sets] == ["image-files"]
 
 
-def test_a_binary_only_file_names_its_companion(
+def test_a_binary_only_file_names_its_companion_and_declares_nothing(
     handler: ImageHandler, dataset: Path
 ) -> None:
-    """Detected and named, not read. Opening a second file to describe the
-    first is a different change."""
+    """The schema forbids a place-holder any other content, so it carries no
+    header field — not even the zero images it declares, which is a fact about
+    the stub rather than about the image the file holds."""
     result = build(handler, dataset, {"a.ome.tif": BINARY_ONLY_TIFF})
 
     record_set = nodes_by_name(result.record_sets)["ome_images"]
     assert "plate.companion.ome" in record_set.description
-    assert "size_c" not in fields_of(record_set)
+    assert list(fields_of(record_set)) == ["image"]
 
 
 # --------------------------------------------------------------------------

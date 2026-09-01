@@ -134,6 +134,16 @@ def _read_with_tifffile(source: FileSource) -> Dict:
     with source.open() as stream, tifffile.TiffFile(stream) as tif:
         page = tif.pages[0]
         header = ome.read(tif)
+        if header is not None and header.refusal:
+            # The record-set description carries the count, but a *described*
+            # file has no scan-report entry to hang a reason on, so without
+            # this nothing at runtime says metadata was dropped.
+            logger.warning(
+                "%s: the OME-XML was not parsed (%s). The file is described "
+                "as a plain TIFF.",
+                source.relative_path,
+                header.refusal,
+            )
         # Prefer the TIFF tags, which describe the logical image dimensions
         # directly and are not affected by planar storage order.
         width = getattr(page, "imagewidth", None)
@@ -254,11 +264,10 @@ class ImageHandler(FileTypeHandler):
         if not file_metas:
             return BuildResult([], [])
 
-        # One handler covers nine extensions, so its record set has one row per
-        # image of any kind. Ten OME fields on that row would attribute a pixel
-        # size to every PNG in the same directory, and a mixed tree is the
-        # shape microscopy deposits actually have. So the OME files are
-        # described separately, and the two collections partition the batch.
+        # One handler covers every image extension, so ``images`` has one row
+        # per image of any kind, and OME fields on that row would attribute a
+        # pixel size to every PNG in the same directory. So the OME files are
+        # described separately and the two collections partition the batch.
         ome_metas = [meta for meta in file_metas if meta.get("ome") is not None]
         plain_metas = [meta for meta in file_metas if meta.get("ome") is None]
 
@@ -431,7 +440,13 @@ def _ome_file_set(file_metas: List[Dict]) -> mlc.FileSet:
 
 def _ome_record_set(file_metas: List[Dict]) -> mlc.RecordSet:
     headers = [meta["ome"] for meta in file_metas]
-    parsed = [header for header in headers if not header.refusal]
+    # A BinaryOnly document is a place-holder whose metadata is in a companion
+    # file, and the schema forbids it any other content. Its zero images is a
+    # fact about the stub, not about the image the file holds, so it is left
+    # out of the aggregates rather than reported as the file's own.
+    parsed = [
+        header for header in headers if not header.refusal and not header.binary_only
+    ]
 
     fields = [
         mlc.Field(
@@ -516,12 +531,14 @@ def _ome_description(file_metas: List[Dict], headers: List) -> str:
             f"not parsed: {'; '.join(sorted(set(refused)))}."
         )
 
-    companions = sorted({header.companion for header in headers if header.companion})
-    if companions:
+    stubs = [header for header in headers if header.binary_only]
+    if stubs:
+        named = sorted({header.companion for header in stubs if header.companion})
         text += (
-            f" {len(companions)} companion file(s) hold the metadata of a "
-            f"BinaryOnly image and are not read: {', '.join(companions)}."
+            f" {len(stubs)} of {total} are BinaryOnly place-holders whose "
+            "metadata is in a companion file that is not read"
         )
+        text += f": {', '.join(named)}." if named else "."
     return text
 
 

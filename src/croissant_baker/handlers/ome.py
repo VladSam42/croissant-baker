@@ -1,14 +1,7 @@
-"""What an OME-TIFF's header says about itself.
+"""Read the OME-XML document an OME-TIFF carries in its ImageDescription tag.
 
-OME-TIFF is the interchange format of light microscopy: what Bio-Formats
-writes, what OMERO and the Image Data Resource serve, and what a microscope
-exports when asked for something another lab can read. Its TIFF header carries
-an OME-XML document in tag 270 saying what the image *is* — how many channels,
-what the pixel spacing is in physical units, which axis order the planes are
-in, what the pixel type is.
-
-This module reads that document and nothing else. It builds no Croissant, opens
-no file, and never touches pixel data.
+Pure: builds no Croissant, opens no file, and never touches pixel data. See
+``docs/user-guide/supported-formats.md`` for what is done with the result.
 """
 
 from __future__ import annotations
@@ -23,10 +16,9 @@ logger = logging.getLogger(__name__)
 #: The TIFF tag OME-XML travels in: ImageDescription.
 IMAGE_DESCRIPTION = 270
 
-#: OME-XML larger than this is not parsed. A high-content-screening plate's
-#: reaches it, and describing 384 wells is a different change. The cap bounds
-#: the tree ElementTree would build, not the read: tifffile decodes tag 270
-#: while it opens the file, before any of this runs.
+#: OME-XML larger than this is not parsed; a screening plate's reaches it. The
+#: cap bounds the tree ElementTree would build and not the read, because
+#: tifffile decodes tag 270 while opening the file, before any of this runs.
 MAX_DESCRIPTION_BYTES = 8 << 20
 
 #: Refusals. A file that earns one is still described — as a plain TIFF.
@@ -34,12 +26,10 @@ DECLARATION = "it declares a DTD or an entity"
 OVERSIZED = "it is larger than {mib} MiB"
 MALFORMED = "it is not well-formed"
 
-# XML spells both of these in upper case, so a plain substring test finds them.
-# Expat caps entity amplification at roughly 100x, so what is left to refuse is
-# bounded rather than unbounded expansion — 353 bytes of declaration buying a
-# megabyte of text. OME-XML carries no DTD, its root being ``<OME xmlns=…>``
-# behind at most an XML declaration, so nothing legitimate is lost, and the
-# refusal does not depend on which Expat the user has linked.
+# XML spells both in upper case, so a substring test finds them. Expat already
+# caps entity amplification, so this refuses the bounded remainder — 353 bytes
+# buying a megabyte — without depending on which Expat is linked. OME-XML
+# carries no DTD, so nothing legitimate is refused.
 _DECLARATIONS = ("<!DOCTYPE", "<!ENTITY")
 
 
@@ -54,7 +44,9 @@ class OMEHeader:
     Attributes:
         version: The schema version, from the root element's namespace.
         image_count: ``<Image>`` elements the document declares.
-        companion: The sidecar a ``BinaryOnly`` file keeps its metadata in.
+        binary_only: The document is a place-holder, and the schema forbids it
+            any other metadata, so it describes nothing about the image.
+        companion: The file a place-holder keeps its metadata in.
         refusal: Why the document was not parsed, empty if it was.
     """
 
@@ -69,6 +61,7 @@ class OMEHeader:
     physical_size_y: Optional[float] = None
     physical_size_unit: Optional[str] = None
     channel_names: Tuple[str, ...] = ()
+    binary_only: bool = False
     companion: str = ""
     refusal: str = ""
 
@@ -135,7 +128,10 @@ def parse(document: str) -> Optional[OMEHeader]:
         physical_size_y=_float(attributes, "PhysicalSizeY"),
         physical_size_unit=attributes.get("PhysicalSizeXUnit"),
         channel_names=channels,
-        companion=sidecar.get("FileName", "") if sidecar is not None else "",
+        binary_only=sidecar is not None,
+        # ``MetadataFile``, not ``FileName``: that is TiffData/UUID's attribute,
+        # for the multi-file case. Both name a file, and only one of them here.
+        companion=sidecar.get("MetadataFile", "") if sidecar is not None else "",
     )
 
 

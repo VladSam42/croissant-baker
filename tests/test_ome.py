@@ -125,14 +125,16 @@ def test_the_pixels_fields_describe_the_first_image() -> None:
     assert header.channel_names == ("DAPI", "ATP1A1", "18S")
 
 
-def test_a_binary_only_file_names_its_companion_and_reads_no_pixels_block() -> None:
-    """The metadata lives in a sidecar. Naming it beats an empty record set,
-    and reading a second file to describe the first is not a handler's job."""
+def test_a_binary_only_file_names_its_companion() -> None:
+    """The attribute is ``MetadataFile``. ``FileName`` is TiffData/UUID's, for
+    the multi-file case, and reading the wrong one loses a valid name in
+    silence."""
     header = ome.parse(
-        ome_xml('<BinaryOnly UUID="urn:uuid:9c1b" FileName="plate.companion.ome"/>')
+        ome_xml('<BinaryOnly UUID="urn:uuid:9c1b" MetadataFile="plate.companion.ome"/>')
     )
 
     assert header is not None
+    assert header.binary_only is True
     assert header.companion == "plate.companion.ome"
     assert header.image_count == 0
     assert header.size_c is None
@@ -210,6 +212,9 @@ def test_an_oversized_description_is_not_parsed(monkeypatch) -> None:
         ("no description at all", None),
         ("ImageJ", "ImageJ=1.53t\nimages=1\nslices=1\n"),
         ("XML that is not OME", "<MetaData><PlaneInfo/></MetaData>"),
+        # Nothing identifies this as OME, so it is a plain TIFF rather than a
+        # refusal. Only a document that reaches the root element can be one.
+        ("OME truncated before its root closes", '<OME xmlns="x"><Image'),
     ],
 )
 def test_a_tiff_carrying_no_ome_xml_has_no_header(
