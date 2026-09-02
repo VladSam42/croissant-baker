@@ -643,12 +643,24 @@ def test_every_field_is_typed_and_only_the_image_field_extracts(
     result = build(handler, dataset, {"a.ome.tif": OME_TIFF})
 
     fields = fields_of(nodes_by_name(result.record_sets)["ome_images"])
+    # Exact, so that dropping a row from ``_OME_FIELDS`` fails here. Spot-checking
+    # four of the types let three fields go missing in silence. ``str`` because
     # mlcroissant hands a dataType back as an rdflib URIRef, which does not
     # compare equal to a plain str from the left.
-    assert str(fields["image"]["dataType"]) == "sc:ImageObject"
-    assert str(fields["size_c"]["dataType"]) == "sc:Integer"
-    assert str(fields["physical_size_x"]["dataType"]) == "sc:Float"
-    assert str(fields["dimension_order"]["dataType"]) == "sc:Text"
+    assert {name: str(f["dataType"]) for name, f in fields.items()} == {
+        "image": "sc:ImageObject",
+        "ome_version": "sc:Text",
+        "ome_image_count": "sc:Integer",
+        "size_c": "sc:Integer",
+        "size_z": "sc:Integer",
+        "size_t": "sc:Integer",
+        "dimension_order": "sc:Text",
+        "pixel_type": "sc:Text",
+        "physical_size_x": "sc:Float",
+        "physical_size_y": "sc:Float",
+        "physical_size_unit": "sc:Text",
+        "channel_names": "sc:Text",
+    }
     assert fields["channel_names"]["cr:isArray"] is True
     assert fields["channel_names"]["cr:arrayShape"] == "-1"
 

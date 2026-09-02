@@ -72,6 +72,9 @@ def read(tif) -> Optional[OMEHeader]:
     Args:
         tif: An open :class:`tifffile.TiffFile`.
     """
+    # OME-ness is decided by content, and tifffile makes that decision. A
+    # description it does not recognise as OME-XML — a truncated one, say — is
+    # a plain TIFF rather than a refusal, because nothing identifies it as OME.
     if not tif.is_ome:
         return None
     page = tif.pages.first
