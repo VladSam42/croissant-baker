@@ -1,9 +1,11 @@
 """A handler never observes a compression wrapper, watched from the outside."""
 
 import gzip
+import io
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from croissant_baker.handlers.base_handler import FileTypeHandler
 from croissant_baker.handlers.registry import HandlerRegistry, builtin_handlers
@@ -208,6 +210,35 @@ def test_a_linked_twin_stays_inside_its_primarys_fileset(dataset: Path) -> None:
     write_wrapped(dataset, "pixel.png", PNG_1X1, ".gz")
 
     assert includes(file_sets(bake(dataset))[0]) == ["**/*.png", "**/*.png.gz"]
+
+
+def test_an_upper_case_extension_still_reports_its_wrapper(dataset: Path) -> None:
+    """Dispatch lowercases the suffix, so ``pixel.PNG.gz`` is described as a
+    gzipped PNG. A FileSet that resolved membership by case-sensitive glob text
+    would describe it and then claim it arrived uncompressed."""
+    write_wrapped(dataset, "pixel.PNG", PNG_1X1, ".gz")
+
+    described = file_sets(bake(dataset))[0]
+
+    assert "application/gzip" in described["encodingFormat"]
+
+
+def test_a_twin_under_another_extension_joins_its_primarys_fileset(
+    dataset: Path,
+) -> None:
+    """``pixel.jpg`` and ``pixel.jpeg.gz`` hold the same bytes, so one is
+    described and the other links to it. The link is the only thing tying the
+    twin to the FileSet: no glob the handler declares spells ``.jpeg``."""
+    buffer = io.BytesIO()
+    Image.new("RGB", (4, 4), (10, 20, 30)).save(buffer, "JPEG")
+    jpeg = buffer.getvalue()
+    write_wrapped(dataset, "pixel.jpg", jpeg)
+    write_wrapped(dataset, "pixel.jpeg", jpeg, ".gz")
+
+    described = file_sets(bake(dataset))[0]
+
+    assert "application/gzip" in described["encodingFormat"]
+    assert "pixel.jpeg.gz" in includes(described)
 
 
 @pytest.mark.parametrize("suffix", WRAPPER_SUFFIXES)

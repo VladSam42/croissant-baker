@@ -51,8 +51,12 @@ def _matches(pattern: str, path: str) -> bool:
     Here ``*`` and ``?`` stay inside one path segment, and only ``**`` crosses
     ``/`` — matching zero or more segments, so ``**/*.png`` covers ``a.png`` as
     well as ``deep/a.png``.
+
+    Case-insensitive, because handler dispatch is: ``FileSource.suffix``
+    lowercases, so ``pixel.PNG`` is described by the same handler that declares
+    ``**/*.png`` and belongs to the FileSet that pattern stands for.
     """
-    return _match_segments(pattern.split("/"), path.split("/"))
+    return _match_segments(pattern.lower().split("/"), path.lower().split("/"))
 
 
 def _match_segments(pattern: List[str], parts: List[str]) -> bool:
@@ -93,6 +97,12 @@ def _resolve_file_sets(file_sets: list, stored_paths: dict, entries: list) -> li
     anywhere would otherwise reach a FileSet whose own directory holds none —
     claiming ``application/gzip`` and an include matching no file.
 
+    Membership follows the files, not the glob text. An entry belongs to a
+    FileSet when a pattern matches the name it is stored under, or when it
+    duplicates an entry that belongs: a twin stored as ``pixel.jpeg.gz`` rides
+    with the ``pixel.jpg`` it links to, and no glob the handler declares spells
+    ``.jpeg``.
+
     Args:
         file_sets: FileSets from one handler batch. Mutated in place.
         stored_paths: Logical dataset-relative path to the stored paths sharing
@@ -103,12 +113,10 @@ def _resolve_file_sets(file_sets: list, stored_paths: dict, entries: list) -> li
     Returns:
         ``file_sets``, for chaining.
     """
-    logical_paths = list(
-        dict.fromkeys(
-            str(e.path.with_name(compression.logical_name(e.path.name)))
-            for e in entries
-        )
-    )
+    by_logical: dict = {}
+    for entry in entries:
+        logical = str(entry.path.with_name(compression.logical_name(entry.path.name)))
+        by_logical.setdefault(logical, []).append(entry)
 
     for file_set in file_sets:
         includes = getattr(file_set, "includes", None) or []
@@ -118,19 +126,22 @@ def _resolve_file_sets(file_sets: list, stored_paths: dict, entries: list) -> li
         for pattern in includes:
             if any(char in pattern for char in _GLOB_CHARS):
                 matched = [
-                    stored
-                    for logical in logical_paths
+                    str(entry.path)
+                    for logical, found in by_logical.items()
                     if _matches(pattern, logical)
-                    for stored in stored_paths.get(logical, ())
+                    for entry in found
                 ]
                 resolved.extend(
                     compression.expand_globs([pattern], _wrappers_among(matched))
                 )
             else:
-                # An exact name the scan did not find would be a phantom entry.
                 matched = list(stored_paths.get(pattern, ()))
                 resolved.extend(matched)
             members.extend(matched)
+
+        for entry in _dependants_of(members, entries):
+            resolved.append(str(entry.path))
+            members.append(str(entry.path))
 
         formats = list(file_set.encoding_formats or [])
         file_set.encoding_formats = formats + [
@@ -141,3 +152,20 @@ def _resolve_file_sets(file_sets: list, stored_paths: dict, entries: list) -> li
         if includes:
             file_set.includes = list(dict.fromkeys(resolved))
     return file_sets
+
+
+def _dependants_of(members: List[str], entries: list) -> list:
+    """Entries linking to a member, that no pattern already covers.
+
+    A duplicate gave up its structure to the file it links to, so it belongs
+    wherever that file belongs. Named by its stored path, since the name it
+    duplicates is by definition not the name it is stored under.
+    """
+    covered = set(members)
+    return [
+        entry
+        for entry in entries
+        if entry.duplicate_of is not None
+        and str(entry.duplicate_of.path) in covered
+        and str(entry.path) not in covered
+    ]
