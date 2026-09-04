@@ -74,6 +74,13 @@ def _dicom() -> list:
     return [("scan.dcm", source.read_bytes())]
 
 
+def _hdf5() -> list:
+    """A 10x feature matrix: the smallest sample that exercises a layout."""
+    from tests.hdf5_fixtures import tenx_bytes
+
+    return [("filtered_feature_bc_matrix.h5", tenx_bytes())]
+
+
 def _nifti() -> list:
     source = next(_SPECT.rglob("*.nii.gz"), None)
     assert source is not None, f"tracked NIfTI fixture missing under {_SPECT}"
@@ -93,6 +100,7 @@ SAMPLES: dict[str, Callable[[], list]] = {
     "ImageHandler": _png,
     "DICOMHandler": _dicom,
     "NIfTIHandler": _nifti,
+    "HDF5Handler": _hdf5,
 }
 
 #: Handlers with no sample, and why.
