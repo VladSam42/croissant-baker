@@ -7,6 +7,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+import croissant_baker.handlers.parquet_handler as parquet_handler_module
 from croissant_baker import compression
 from croissant_baker.scan import Reason
 from croissant_baker.handlers.parquet_handler import ParquetHandler
@@ -505,3 +506,31 @@ def test_a_stream_that_refuses_to_seek_declines_rather_than_raising(
         assert handler.claims(make_source(path)) is False
     finally:
         compression._registry.remove(stubborn)
+
+
+def test_the_parquet_reader_is_closed_after_extraction(
+    handler: ParquetHandler, sample_parquet: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #54: a bake of ten thousand shards must not hold ten
+    thousand readers open. The reader is opened in a ``with``, and nothing but
+    a test can see that it is."""
+    opened = []
+
+    class _Spy(parquet_handler_module.ParquetFile):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.was_closed = False
+            opened.append(self)
+
+        def close(self, *args, **kwargs):
+            self.was_closed = True
+            return super().close(*args, **kwargs)
+
+    monkeypatch.setattr(parquet_handler_module, "ParquetFile", _Spy)
+
+    handler.extract(make_source(sample_parquet))
+
+    assert opened, "the handler never opened a ParquetFile"
+    # Not reader.closed: the reader wraps the stream the outer `with` closes,
+    # so it reads as closed either way. Only close() distinguishes them.
+    assert all(pf.was_closed for pf in opened)

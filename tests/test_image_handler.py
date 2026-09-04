@@ -258,3 +258,35 @@ def test_image_build_croissant_multiband(handler: ImageHandler) -> None:
     _, record_sets = handler.build_croissant(metas, [f"file_{i}" for i in range(3)])
 
     assert "band" in record_sets[0].description
+
+
+def test_a_bigtiff_is_claimed_and_described(
+    handler: ImageHandler, tmp_path: Path
+) -> None:
+    """Regression test for #93, which made claims() check magic bytes.
+
+    BigTIFF is classic TIFF with a 64-bit offset field, which any writer
+    switches to at 4 GiB — where whole-slide imaging, EM volumes and geospatial
+    rasters all live. It differs in one byte, 0x2b against 0x2a, so a magic
+    check listing only 0x2a would reject a valid .tiff. The version byte is
+    asserted before the handler is asked, since a fixture written as classic
+    TIFF would let the claim pass for the wrong reason.
+    """
+    path = tmp_path / "tissue.tiff"
+    tifffile.imwrite(
+        str(path),
+        np.zeros((16, 16), np.uint16),
+        photometric="minisblack",
+        bigtiff=True,
+    )
+    assert path.read_bytes()[:4] == b"II+\x00"
+
+    source = make_source(path)
+    assert handler.claims(source) is True
+
+    props = handler.extract(source)["image_properties"]
+
+    assert (props["width"], props["height"]) == (16, 16)
+    # BigTIFF is a TIFF variant; a second token here would reach the format
+    # breakdown the record-set description reports.
+    assert props["image_format"] == "TIFF"
