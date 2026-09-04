@@ -469,12 +469,20 @@ def test_a_derived_fileset_id_cannot_collide_with_a_record_set(tmp_path: Path) -
 def test_the_magic_check_reads_the_footer_through_any_wrapper(
     handler: ParquetHandler, sample_parquet: Path, tmp_path: Path, suffix: str
 ) -> None:
-    """Every registered compression supports seeking from the end of a stream."""
-    wrapped = write_wrapped(
-        tmp_path, "wrapped.parquet", sample_parquet.read_bytes(), suffix
+    """Every registered compression supports seeking from the end of a stream.
+
+    Both directions, because the head of a Parquet file is also ``PAR1``: a
+    check that read the head twice would accept the truncated file too, and
+    the seek would never be exercised.
+    """
+    payload = sample_parquet.read_bytes()
+    whole = write_wrapped(tmp_path, "whole.parquet", payload, suffix)
+    footerless = write_wrapped(
+        tmp_path, "footerless.parquet", payload[:-4] + b"\x00" * 4, suffix
     )
 
-    assert handler.claims(make_source(wrapped))
+    assert handler.claims(make_source(whole)) is True
+    assert handler.claims(make_source(footerless)) is False
 
 
 def test_a_stream_that_refuses_to_seek_declines_rather_than_raising(
