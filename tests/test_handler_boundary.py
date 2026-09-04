@@ -165,6 +165,51 @@ def test_a_glob_stays_scoped_to_the_directory_it_describes(dataset: Path) -> Non
     ]
 
 
+def test_a_wrapper_elsewhere_does_not_reach_an_unrelated_fileset(
+    dataset: Path,
+) -> None:
+    """The reviewer's case: one wrapper list per handler batch, given to every
+    FileSet in it. Nothing in ``data/`` is gzipped, so nothing there may say so."""
+    ((_, payload),) = SAMPLES["ParquetHandler"]()
+    data = dataset / "data"
+    data.mkdir()
+    write_wrapped(data, "part-0.parquet", payload)
+    write_wrapped(data, "part-1.parquet", payload)
+    write_wrapped(dataset, "patients.parquet", payload, ".gz")
+
+    grouped = next(fs for fs in file_sets(bake(dataset)) if fs["@id"] == "data-fileset")
+
+    assert includes(grouped) == ["data/*.parquet"]
+    assert grouped["encodingFormat"] == "application/vnd.apache.parquet"
+
+
+def test_a_glob_does_not_reach_into_a_deeper_directory(dataset: Path) -> None:
+    """``data/*.parquet`` is one level of ``data``, not any ``data`` anywhere.
+
+    ``Path.match`` is right-anchored, so it answers this one wrong: it accepts
+    ``other/data/x.parquet``.
+    """
+    ((_, payload),) = SAMPLES["ParquetHandler"]()
+    for directory in ("data", "other/data"):
+        (dataset / directory).mkdir(parents=True)
+        write_wrapped(dataset / directory, "part-0.parquet", payload)
+        write_wrapped(dataset / directory, "part-1.parquet", payload)
+    write_wrapped(dataset / "other" / "data", "part-2.parquet", payload, ".gz")
+
+    grouped = next(fs for fs in file_sets(bake(dataset)) if fs["@id"] == "data-fileset")
+
+    # The .gz lives two directories down, under other/data.
+    assert includes(grouped) == ["data/*.parquet"]
+
+
+def test_a_linked_twin_stays_inside_its_primarys_fileset(dataset: Path) -> None:
+    """A duplicate rides with the file it links to, wrapper suffix and all."""
+    write_wrapped(dataset, "pixel.png", PNG_1X1)
+    write_wrapped(dataset, "pixel.png", PNG_1X1, ".gz")
+
+    assert includes(file_sets(bake(dataset))[0]) == ["**/*.png", "**/*.png.gz"]
+
+
 @pytest.mark.parametrize("suffix", WRAPPER_SUFFIXES)
 def test_a_description_names_the_file_a_reader_can_find(
     suffix: str, tmp_path: Path

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from croissant_baker import compression
+from croissant_baker.assembly import _matches
 from croissant_baker.handlers.registry import (
     get_registered_handlers,
     register_all_handlers,
@@ -134,6 +135,51 @@ def test_wrapped_is_described_like_plain(
     )
 
     _assert_every_stored_file_is_covered(wrapped, wrapped_dir)
+    _assert_no_wrapper_is_claimed_without_a_file(wrapped, wrapped_dir)
+
+
+def _assert_no_wrapper_is_claimed_without_a_file(
+    metadata: dict, directory: Path
+) -> None:
+    """A FileSet may only name a wrapper its own files actually use.
+
+    Two ways to break it, and this catches both: a compressed ``includes``
+    variant matching nothing on disk, and an ``encodingFormat`` naming a
+    compression no member arrived in. Deriving the wrapper set per handler
+    batch rather than per FileSet produces exactly these.
+
+    The plain patterns a handler declares are its own — ``**/*.dicom`` beside
+    ``**/*.dcm`` names a second spelling of one extension, and stays whether or
+    not a file uses it. Only the variants the pipeline derives are asserted.
+    """
+    stored = [
+        str(p.relative_to(directory)) for p in directory.rglob("*") if p.is_file()
+    ]
+    wrapper_types = {c.media_type: c.suffix for c in compression.compressions()}
+
+    for file_set in [
+        n for n in metadata["distribution"] if n.get("@type") == "cr:FileSet"
+    ]:
+        patterns = (
+            file_set["includes"]
+            if isinstance(file_set["includes"], list)
+            else [file_set["includes"]]
+        )
+        for pattern in patterns:
+            if not compression.is_compressed(pattern):
+                continue
+            assert any(_matches(pattern, s) for s in stored), (
+                f"{file_set['@id']}: {pattern} matches no file in {stored}"
+            )
+
+        formats = file_set.get("encodingFormat")
+        formats = formats if isinstance(formats, list) else [formats]
+        covered = [s for s in stored if any(_matches(p, s) for p in patterns)]
+        used = {compression.compression_for(Path(s).name) for s in covered}
+        used = {c.media_type for c in used if c is not None}
+        assert {f for f in formats if f in wrapper_types} <= used, (
+            f"{file_set['@id']}: claims {formats}, members use {used or 'none'}"
+        )
 
 
 def _assert_every_stored_file_is_covered(metadata: dict, directory: Path) -> None:
@@ -152,16 +198,9 @@ def _assert_every_stored_file_is_covered(metadata: dict, directory: Path) -> Non
         if not stored.is_file():
             continue
         rel = stored.relative_to(directory)
-        assert any(_matches(rel, pattern) for pattern in patterns), (
+        assert any(_matches(pattern, str(rel)) for pattern in patterns), (
             f"{rel} is described but matched by none of {patterns}"
         )
-
-
-def _matches(relative: Path, pattern: str) -> bool:
-    """Whether ``relative`` is covered by a Croissant ``includes`` pattern."""
-    return relative.match(pattern) or (
-        pattern.startswith("**/") and relative.match(pattern[3:])
-    )
 
 
 @pytest.fixture

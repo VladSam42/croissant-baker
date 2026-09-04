@@ -15,7 +15,6 @@ import mlcroissant as mlc
 from croissant_baker.assembly import (
     _encoding_formats,
     _resolve_file_sets,
-    _wrappers_in,
 )
 from croissant_baker.identifiers import (
     _assert_unique_node_ids,
@@ -407,9 +406,7 @@ class MetadataGenerator:
 
             described = [e for e in batch if e not in rejected]
             covered = [e for entry in described for e in (entry, *dependants[entry])]
-            file_sets.extend(
-                _resolve_file_sets(built.file_sets, stored_paths, _wrappers_in(covered))
-            )
+            file_sets.extend(_resolve_file_sets(built.file_sets, stored_paths, covered))
             batches.append((handler, built.record_sets))
             for entry in described:
                 entry.describe()

@@ -7,8 +7,9 @@ FileSet ``includes`` is that translation, and it is the generator's alone.
 
 from __future__ import annotations
 
+import fnmatch
 from pathlib import Path
-from typing import List
+from typing import Iterable, List
 
 from croissant_baker import compression
 
@@ -41,53 +42,102 @@ def _encoding_formats(format_media_type: str, relative_path: str) -> List[str]:
 _GLOB_CHARS = ("*", "?", "[")
 
 
-def _wrappers_in(entries: list) -> List:
-    """The compressions among ``entries``, in registry order.
+def _matches(pattern: str, path: str) -> bool:
+    """Whether a dataset-relative ``path`` is covered by an ``includes`` pattern.
 
-    Called per handler batch, so a FileSet declares only the wrappers its own
-    files use. Registry order rather than set order keeps the output stable.
+    Directory-scoped, which is what a Croissant ``includes`` means and what
+    ``Path.match`` does not do: ``Path("other/data/x.parquet").match(
+    "data/*.parquet")`` is ``True``, because ``match`` anchors on the right.
+    Here ``*`` and ``?`` stay inside one path segment, and only ``**`` crosses
+    ``/`` — matching zero or more segments, so ``**/*.png`` covers ``a.png`` as
+    well as ``deep/a.png``.
+    """
+    return _match_segments(pattern.split("/"), path.split("/"))
+
+
+def _match_segments(pattern: List[str], parts: List[str]) -> bool:
+    if not pattern:
+        return not parts
+    head, rest = pattern[0], pattern[1:]
+    if head == "**":
+        return any(_match_segments(rest, parts[i:]) for i in range(len(parts) + 1))
+    if not parts:
+        return False
+    return fnmatch.fnmatchcase(parts[0], head) and _match_segments(rest, parts[1:])
+
+
+def _wrappers_among(stored: Iterable[str]) -> List:
+    """The compressions used by ``stored``, in registry order.
+
+    Registry order rather than set order keeps the output stable.
     """
     present = {
         comp.suffix
-        for entry in entries
-        if (comp := compression.compression_for(entry.path.name))
+        for name in stored
+        if (comp := compression.compression_for(Path(name).name))
     }
     return [c for c in compression.compressions() if c.suffix in present]
 
 
-def _resolve_file_sets(file_sets: list, stored_paths: dict, wrappers: list) -> list:
+def _resolve_file_sets(file_sets: list, stored_paths: dict, entries: list) -> list:
     """Point each FileSet at the files as stored, and at the wrappers they use.
 
     A handler names its files logically; only the generator knows what is on
     disk. An exact name becomes the stored path or paths it stands for, and a
-    pattern gains one variant per compression present. Expanding an exact name
-    as if it were a pattern would append a second suffix.
+    pattern gains one variant per compression used by the files *that pattern*
+    matches. Expanding an exact name as if it were a pattern would append a
+    second suffix.
+
+    Each FileSet is resolved against its own members, never against the batch:
+    one handler describes every file of its format in the dataset, so a wrapper
+    anywhere would otherwise reach a FileSet whose own directory holds none —
+    claiming ``application/gzip`` and an include matching no file.
 
     Args:
         file_sets: FileSets from one handler batch. Mutated in place.
         stored_paths: Logical dataset-relative path to the stored paths sharing
             it. A plain file and its wrapper share one logical key.
-        wrappers: Compressions present in this batch, in registry order.
+        entries: The scan entries this batch describes, including the linked
+            duplicates riding along with them.
 
     Returns:
         ``file_sets``, for chaining.
     """
-    wrapper_types = [c.media_type for c in wrappers]
-    for file_set in file_sets:
-        formats = list(file_set.encoding_formats or [])
-        file_set.encoding_formats = formats + [
-            t for t in wrapper_types if t not in formats
-        ]
+    logical_paths = list(
+        dict.fromkeys(
+            str(e.path.with_name(compression.logical_name(e.path.name)))
+            for e in entries
+        )
+    )
 
-        includes = getattr(file_set, "includes", None)
-        if not includes:
-            continue
+    for file_set in file_sets:
+        includes = getattr(file_set, "includes", None) or []
         resolved: List[str] = []
+        members: List[str] = []
+
         for pattern in includes:
             if any(char in pattern for char in _GLOB_CHARS):
-                resolved.extend(compression.expand_globs([pattern], wrappers))
+                matched = [
+                    stored
+                    for logical in logical_paths
+                    if _matches(pattern, logical)
+                    for stored in stored_paths.get(logical, ())
+                ]
+                resolved.extend(
+                    compression.expand_globs([pattern], _wrappers_among(matched))
+                )
             else:
                 # An exact name the scan did not find would be a phantom entry.
-                resolved.extend(stored_paths.get(pattern, ()))
-        file_set.includes = list(dict.fromkeys(resolved))
+                matched = list(stored_paths.get(pattern, ()))
+                resolved.extend(matched)
+            members.extend(matched)
+
+        formats = list(file_set.encoding_formats or [])
+        file_set.encoding_formats = formats + [
+            c.media_type
+            for c in _wrappers_among(members)
+            if c.media_type not in formats
+        ]
+        if includes:
+            file_set.includes = list(dict.fromkeys(resolved))
     return file_sets
