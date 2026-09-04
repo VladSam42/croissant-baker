@@ -81,6 +81,46 @@ def test_a_handler_claims_its_own_format_wrapped_or_not(
         )
 
 
+@pytest.mark.parametrize("suffix", ["", *WRAPPER_SUFFIXES])
+@pytest.mark.parametrize("name", SAMPLED)
+def test_a_handler_claims_its_own_format_in_upper_case(
+    name: str, suffix: str, dataset: Path
+) -> None:
+    """``SCAN.DCM`` is the same file as ``scan.dcm``, wrapped or not.
+
+    The behaviour is ``FileSource.suffix``'s, not any one handler's, so one
+    case here covers all nine rather than the DICOM handler alone.
+    """
+    handler = HANDLERS[name]
+    for logical, payload in SAMPLES[name]():
+        shouted = str(Path(logical).with_suffix(Path(logical).suffix.upper()))
+        path = write_wrapped(dataset, shouted, payload, suffix)
+        assert handler.claims(source_for(handler, path, Path(shouted))), (
+            f"{name} did not claim its own {shouted}{suffix}"
+        )
+
+
+@pytest.mark.parametrize("name", SAMPLED)
+def test_case_never_changes_a_claim(name: str, dataset: Path) -> None:
+    """Over every extension a handler declares, not only its sample's.
+
+    ``.dicom`` is the second spelling DICOMHandler accepts and no sample
+    carries; this is where ``.DICOM`` is exercised.
+    """
+    handler = HANDLERS[name]
+    _, payload = SAMPLES[name]()[0]
+
+    for ext in handler.EXTENSIONS:
+        quiet = write_wrapped(dataset, f"probe{ext}", payload)
+        shouted = write_wrapped(dataset, f"probe{ext.upper()}", payload)
+
+        assert handler.claims(
+            source_for(handler, shouted, Path(shouted.name))
+        ) is handler.claims(source_for(handler, quiet, Path(quiet.name))), (
+            f"{name} answers differently for probe{ext} and probe{ext.upper()}"
+        )
+
+
 @pytest.mark.parametrize("name", NAMES)
 def test_a_handler_declines_another_handlers_exclusive_format(
     name: str, dataset: Path
