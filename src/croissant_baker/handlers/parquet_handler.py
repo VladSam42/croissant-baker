@@ -39,20 +39,14 @@ _PARQUET_MAGIC_LEN = len(_PARQUET_MAGIC)
 
 
 def _tail(stream, size: int) -> bytes:
-    """Return the last ``size`` bytes of ``stream`` from its current position.
+    """Return the last ``size`` bytes of ``stream``.
 
-    Seeks from the end when the stream allows it. A stream that refuses — gzip
-    in read mode — is read forward keeping a rolling tail: one pass, constant
-    memory.
+    gzip, bzip2 and xz all support ``SEEK_END`` in read mode — the seek costs a
+    decompression pass, which is why the footer check is not free. A stream
+    that refuses raises, and :func:`_has_parquet_magic` declines the file.
     """
-    try:
-        stream.seek(-size, 2)
-        return stream.read(size)
-    except (OSError, ValueError):
-        tail = b""
-        while chunk := stream.read(1 << 20):
-            tail = (tail + chunk)[-size:]
-        return tail
+    stream.seek(-size, 2)
+    return stream.read(size)
 
 
 def _has_parquet_magic(source: FileSource) -> bool:
@@ -92,7 +86,9 @@ def _has_parquet_magic(source: FileSource) -> bool:
                 )
                 return False
             return True
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError: a compression whose stream refuses SEEK_END. None of the
+        # built-in three do, but register_compression is public.
         return False
 
 

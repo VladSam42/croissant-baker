@@ -170,3 +170,25 @@ def test_a_partially_migrated_handler_still_bakes(
     entry = generator.scan_report.entries[0]
     assert entry.outcome is Outcome.DESCRIBED
     assert entry.meta["encoding_format"].startswith("application/x-")
+
+
+def test_the_deprecated_text_opener_still_reads_a_wrapped_file(
+    tmp_path: Path,
+) -> None:
+    """A handler written against the previous contract still imports and runs.
+
+    The reviewer read compression.open_text as unused. It is not: it is what
+    this shim resolves compression through, and the PR promises the shim keeps
+    working. Inlining the body honours both.
+    """
+    import gzip
+
+    from croissant_baker.handlers.utils import open_text_file
+
+    path = tmp_path / "notes.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as fh:
+        fh.write("id,name\n1,Ada\n")
+
+    with pytest.warns(DeprecationWarning, match="open_text_file is deprecated"):
+        with open_text_file(path) as fh:
+            assert fh.read() == "id,name\n1,Ada\n"

@@ -22,7 +22,6 @@ from typing import (
     List,
     Optional,
     Sequence,
-    TextIO,
     Tuple,
 )
 
@@ -46,9 +45,6 @@ class Compression:
 
     def open_binary(self, path: Path) -> BinaryIO:
         return self.opener(path, "rb")  # type: ignore[return-value]
-
-    def open_text(self, path: Path, encoding: str = DEFAULT_TEXT_ENCODING) -> TextIO:
-        return self.opener(path, "rt", encoding=encoding)  # type: ignore[return-value]
 
 
 GZIP = Compression("gzip", ".gz", "application/gzip", gzip.open)
@@ -151,11 +147,3 @@ def open_binary(path: Path) -> BinaryIO:
     """
     comp = compression_for(path.name)
     return comp.open_binary(path) if comp else open(path, "rb")
-
-
-def open_text(path: Path, encoding: str = DEFAULT_TEXT_ENCODING) -> TextIO:
-    """Open ``path`` as text, transparently decompressing a wrapper."""
-    comp = compression_for(path.name)
-    if comp is None:
-        return open(path, "r", encoding=encoding)
-    return comp.open_text(path, encoding=encoding)

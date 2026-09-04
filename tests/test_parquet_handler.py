@@ -1,14 +1,18 @@
 """Tests for Parquet handler."""
 
+import io
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from croissant_baker import compression
 from croissant_baker.scan import Reason
 from croissant_baker.handlers.parquet_handler import ParquetHandler
 from croissant_baker.sources import make_source
+
+from tests.helpers import write_wrapped
 
 
 @pytest.fixture
@@ -458,3 +462,46 @@ def test_a_derived_fileset_id_cannot_collide_with_a_record_set(tmp_path: Path) -
     assert "foo-fileset" in record_ids
     assert "foo-fileset__2" in file_set_ids
     assert not record_ids & file_set_ids
+
+
+@pytest.mark.parametrize("suffix", ["", ".gz", ".bz2", ".xz"])
+def test_the_magic_check_reads_the_footer_through_any_wrapper(
+    handler: ParquetHandler, sample_parquet: Path, tmp_path: Path, suffix: str
+) -> None:
+    """Every registered compression supports seeking from the end of a stream."""
+    wrapped = write_wrapped(
+        tmp_path, "wrapped.parquet", sample_parquet.read_bytes(), suffix
+    )
+
+    assert handler.claims(make_source(wrapped))
+
+
+def test_a_stream_that_refuses_to_seek_declines_rather_than_raising(
+    handler: ParquetHandler, sample_parquet: Path, tmp_path: Path
+) -> None:
+    """A third-party compression is free to refuse SEEK_END; the claim is not.
+
+    None of the built-in three do, so the guard is only reachable through
+    register_compression — which is public, so it stays.
+    """
+
+    class _NoSeekEnd(io.BufferedReader):
+        def seek(self, offset, whence=0):
+            if whence == 2:
+                raise ValueError("cannot seek from the end of this stream")
+            return super().seek(offset, whence)
+
+    def _opener(path, mode="rb", **kwargs):
+        return _NoSeekEnd(open(path, "rb"))
+
+    stubborn = compression.Compression(
+        "stubborn", ".stub", "application/x-stubborn", _opener
+    )
+    compression.register_compression(stubborn)
+    try:
+        path = tmp_path / "table.parquet.stub"
+        path.write_bytes(sample_parquet.read_bytes())
+
+        assert handler.claims(make_source(path)) is False
+    finally:
+        compression._registry.remove(stubborn)

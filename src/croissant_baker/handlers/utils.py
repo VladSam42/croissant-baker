@@ -60,7 +60,11 @@ def open_text_file(file_path: Path):
         DeprecationWarning,
         stacklevel=2,
     )
-    return compression.open_text(Path(file_path))
+    path = Path(file_path)
+    comp = compression.compression_for(path.name)
+    if comp is None:
+        return open(path, "r", encoding=compression.DEFAULT_TEXT_ENCODING)
+    return comp.opener(path, "rt", encoding=compression.DEFAULT_TEXT_ENCODING)
 
 
 # Characters that are invalid in Croissant @id values.
