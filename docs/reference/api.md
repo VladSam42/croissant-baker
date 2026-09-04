@@ -24,6 +24,8 @@ still explain itself.
       members:
         - total
         - described
+        - linked
+        - referenced
         - undescribed
         - counts
         - summary_lines

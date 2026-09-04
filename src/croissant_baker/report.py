@@ -13,7 +13,7 @@ from typing import Dict, List
 
 from croissant_baker.entries import REASON_LABELS, Outcome, Reason, ScanEntry
 
-IN_DOCUMENT = frozenset({Outcome.DESCRIBED, Outcome.LINKED, Outcome.REFERENCED})
+_IN_DOCUMENT = frozenset({Outcome.DESCRIBED, Outcome.LINKED, Outcome.REFERENCED})
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,7 @@ class ScanReport:
         (``DESCRIBED``), as another form of a described file (``LINKED``), or
         as part of a multi-file record (``REFERENCED``).
         """
-        return [e for e in self.entries if e.outcome not in IN_DOCUMENT]
+        return [e for e in self.entries if e.outcome not in _IN_DOCUMENT]
 
     def counts(self) -> Dict[Reason, int]:
         """Number of entries per reason, in declaration order.

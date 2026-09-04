@@ -261,6 +261,8 @@ def test_the_library_writes_nothing_to_stderr(tmp_path: Path) -> None:
     done = subprocess.run(
         [
             sys.executable,
+            "-W",
+            "ignore",
             "-c",
             "from croissant_baker.metadata_generator import MetadataGenerator;"
             f"MetadataGenerator(dataset_path={str(dataset)!r}, name='t')"

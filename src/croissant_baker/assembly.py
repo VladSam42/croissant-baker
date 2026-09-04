@@ -90,7 +90,9 @@ def _resolve_file_sets(file_sets: list, stored_paths: dict, entries: list) -> li
     disk. An exact name becomes the stored path or paths it stands for, and a
     pattern gains one variant per compression used by the files *that pattern*
     matches. Expanding an exact name as if it were a pattern would append a
-    second suffix.
+    second suffix. An exact name is matched exactly, not case-insensitively as
+    a pattern is: it comes from a handler's own metadata, so it already carries
+    the spelling the file is stored under.
 
     Each FileSet is resolved against its own members, never against the batch:
     one handler describes every file of its format in the dataset, so a wrapper

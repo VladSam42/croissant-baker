@@ -434,7 +434,7 @@ class MetadataGenerator:
         # counts what was written rather than what was claimed.
         by_scanned_path = {str(e.path): e for e in entries}
         for parent in surviving:
-            _own, *siblings = staged.get(parent) or [None]
+            _own, *siblings = staged[parent]
             for obj in siblings:
                 sibling = by_scanned_path.get(obj.content_url)
                 if sibling is not None and sibling.outcome in _CARRIED_BY_ANOTHER:
