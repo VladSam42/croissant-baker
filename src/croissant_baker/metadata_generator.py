@@ -40,8 +40,6 @@ from croissant_baker.scan import (
 
 logger = logging.getLogger(__name__)
 
-#: Outcomes a file can still be found in the document under another file's
-#: record: nothing claimed it, or reading it on its own failed.
 _CARRIED_BY_ANOTHER = (Outcome.UNCLAIMED, Outcome.FAILED)
 
 # conformsTo URIs declared on the Dataset. mlcroissant defaults conforms_to to
@@ -436,9 +434,8 @@ class MetadataGenerator:
         # counts what was written rather than what was claimed.
         by_scanned_path = {str(e.path): e for e in entries}
         for parent in surviving:
-            # objects[0] is the parent's own FileObject; the rest are the
-            # siblings its handler read along with it.
-            for obj in staged.get(parent, [])[1:]:
+            _own, *siblings = staged.get(parent) or [None]
+            for obj in siblings:
                 sibling = by_scanned_path.get(obj.content_url)
                 if sibling is not None and sibling.outcome in _CARRIED_BY_ANOTHER:
                     sibling.referenced(parent)

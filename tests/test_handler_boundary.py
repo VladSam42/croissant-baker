@@ -200,7 +200,6 @@ def test_a_glob_does_not_reach_into_a_deeper_directory(dataset: Path) -> None:
 
     grouped = next(fs for fs in file_sets(bake(dataset)) if fs["@id"] == "data-fileset")
 
-    # The .gz lives two directories down, under other/data.
     assert includes(grouped) == ["data/*.parquet"]
 
 

@@ -222,7 +222,6 @@ def test_a_bake_says_how_many_dcm_files_lacked_the_preamble(
     files and says, once, how many it passed over. Without the line, a
     half-described directory looks complete."""
     _make_dicom(tmp_path / "good.dcm")
-    # .dcm-named, no DICM preamble at offset 128.
     (tmp_path / "fragment_a.dcm").write_bytes(b"\x00" * 256)
     (tmp_path / "fragment_b.dcm").write_bytes(b"random bytes that are not dicom")
 

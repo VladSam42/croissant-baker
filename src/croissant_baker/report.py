@@ -13,7 +13,6 @@ from typing import Dict, List
 
 from croissant_baker.entries import REASON_LABELS, Outcome, Reason, ScanEntry
 
-#: The three outcomes that mean a FileObject names the file.
 IN_DOCUMENT = frozenset({Outcome.DESCRIBED, Outcome.LINKED, Outcome.REFERENCED})
 
 

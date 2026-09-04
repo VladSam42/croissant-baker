@@ -59,7 +59,6 @@ def test_the_rest_of_the_directory_is_still_described(report: ScanReport) -> Non
     assert sorted(e.name for e in report.described) == ["good.csv", "twin.csv"]
 
 
-#: The working states. A completed bake leaves no entry in any of them.
 WORKING = {Outcome.PENDING, Outcome.READY, Outcome.WOULD_PROCESS}
 
 
@@ -169,7 +168,6 @@ def test_an_assembly_failure_costs_its_batch_and_nothing_else(
 
     assert _entry(report, "a.csv").outcome is Outcome.FAILED
     assert _entry(report, "a.csv").reason is Reason.BUILD_FAILED
-    # Which files a failing batch took down, and why, with no log to read.
     assert "assembly exploded" in _entry(report, "a.csv").detail
     # A FileObject with no record set is worse than no entry at all.
     assert [d["name"] for d in file_objects(metadata)] == ["b.jsonl"]
@@ -314,7 +312,6 @@ def test_a_referenced_file_names_the_record_that_carries_it(
     assert entry.part_of is not None
     assert entry.part_of.name == "100.hea"
     assert "100.hea" in entry.detail
-    # A file in the document was not refused, so it carries no refusal reason.
     assert entry.reason is None
 
 
@@ -410,9 +407,7 @@ def test_a_file_that_failed_alone_is_still_in_the_document(
 ) -> None:
     """Membership of the document is not the same question as whether the file
     could be read on its own. A handler that emits it anyway puts it in."""
-    metadata, report = bake_with(
-        [_PairHandler(failed_but_emitted)], failed_but_emitted
-    )
+    metadata, report = bake_with([_PairHandler(failed_but_emitted)], failed_but_emitted)
 
     assert "bad.csv" in {f["contentUrl"] for f in file_objects(metadata)}
     assert _entry(report, "bad.csv").outcome is Outcome.REFERENCED
