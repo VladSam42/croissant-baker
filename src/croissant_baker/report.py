@@ -11,7 +11,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List
 
-from croissant_baker.scan import (
+from croissant_baker.entries import (
     REASON_LABELS,
     UNRESOLVED_OUTCOMES,
     Outcome,

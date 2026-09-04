@@ -29,9 +29,9 @@ still explain itself.
         - summary_lines
         - to_dict
 
-::: croissant_baker.scan.Outcome
+::: croissant_baker.entries.Outcome
 
-::: croissant_baker.scan.Reason
+::: croissant_baker.entries.Reason
 
 ## File Discovery
 

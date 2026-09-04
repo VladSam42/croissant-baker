@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 from croissant_baker import compression
-from croissant_baker.scan import Outcome, Reason, ScanEntry
+from croissant_baker.entries import Outcome, Reason, ScanEntry
 
 
 #: How much decompressed data a duplicate check reads from each candidate.

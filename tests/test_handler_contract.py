@@ -264,3 +264,31 @@ def test_the_documented_import_paths_keep_working(module: str, name: str) -> Non
     import importlib
 
     assert hasattr(importlib.import_module(module), name), f"{module}.{name}"
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "croissant_baker.entries",
+        "croissant_baker.scan",
+        "croissant_baker.duplicates",
+        "croissant_baker.report",
+    ],
+)
+def test_every_module_imports_first(module: str) -> None:
+    """Each module must import on its own, in a fresh interpreter.
+
+    An in-process check cannot see this: by the time the suite runs, something
+    has already imported ``croissant_baker.scan`` and populated
+    ``sys.modules``, which is exactly what hides a cycle.
+    """
+    import subprocess
+    import sys
+
+    done = subprocess.run(
+        [sys.executable, "-c", f"import {module}"],
+        capture_output=True,
+        text=True,
+    )
+
+    assert done.returncode == 0, f"{module} does not import alone:\n{done.stderr}"
