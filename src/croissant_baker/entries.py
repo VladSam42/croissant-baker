@@ -37,6 +37,10 @@ class Outcome(str, Enum):
     #: The file is another described file in a different form. Its bytes are
     #: still described; its structure is not.
     LINKED = "linked"
+    #: Nothing claimed the file on its own, and the document carries it anyway:
+    #: a handler reading a multi-file record emitted a FileObject for it. A
+    #: WFDB header brings its ``.dat`` and ``.atr`` in this way.
+    REFERENCED = "referenced"
     #: No handler took the file. See :class:`Reason` for which way.
     UNCLAIMED = "unclaimed"
     #: The file was claimed and then lost at claim, extraction or assembly time.
@@ -104,8 +108,12 @@ class ScanEntry:
                                 -> FAILED the file it duplicates was not described
                          -> FAILED        assembly raised
                 -> UNCLAIMED              nothing took it
+                       -> REFERENCED      another file's handler described it
                 -> FAILED                 claim or extraction raised
                 -> WOULD_PROCESS          --dry-run stops here
+
+    ``DESCRIBED``, ``LINKED`` and ``REFERENCED`` are the three ways into the
+    document. Everything else terminal is a file the document does not carry.
 
     Attributes:
         path: Path relative to the dataset root, wrapper suffix included — the
@@ -116,6 +124,8 @@ class ScanEntry:
         detail: The human-readable explanation behind ``reason``.
         meta: The metadata dict the handler produced.
         duplicate_of: The entry this file duplicates. Set for ``LINKED``.
+        part_of: The entry whose record carries this file. Set for
+            ``REFERENCED``.
 
     Compared by identity, so entries can key the generator's staging dicts.
     """
@@ -128,6 +138,7 @@ class ScanEntry:
     meta: Optional[dict] = None
     error: Optional[BaseException] = None
     duplicate_of: Optional["ScanEntry"] = None
+    part_of: Optional["ScanEntry"] = None
 
     @property
     def name(self) -> str:
@@ -177,6 +188,18 @@ class ScanEntry:
         self.detail = str(error) or type(error).__name__
         self.error = error
         self.meta = None
+
+    def referenced(self, parent: "ScanEntry") -> None:
+        """Record that ``parent``'s handler put this file in the document.
+
+        Legal only from ``PENDING`` and ``UNCLAIMED``: a file that reached a
+        handler of its own has already resolved, and a file that failed stays
+        failed. The refusal reason goes — the file was not refused anything.
+        """
+        self._move(Outcome.REFERENCED, Outcome.PENDING, Outcome.UNCLAIMED)
+        self.part_of = parent
+        self.reason = None
+        self.detail = f"described as part of {parent.path}"
 
     def linked(self, primary: "ScanEntry", reason: Reason, detail: str) -> None:
         """Record that this file duplicates ``primary``.

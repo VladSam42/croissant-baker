@@ -2,14 +2,22 @@
 
 croissant-baker detects file types automatically. Handlers are checked in the order listed below — the first match wins.
 
-Nothing is skipped in silence, and nothing is reported one line per file by default. Every file that goes undescribed is counted in the closing coverage summary under the reason it was passed over. The summary is a fixed size — a header plus at most one line per reason — so a directory with one undescribed file and one with ten thousand print the same shape. The full list is under `--verbose`, or in the machine-readable `--report` file:
+Nothing is skipped in silence, and nothing is reported one line per file by default. The closing coverage summary counts every file the document does not carry, under the reason it was passed over. The summary is a fixed size — a header plus at most one line per reason — so a directory with one undescribed file and one with ten thousand print the same shape. The full list is under `--verbose`, or in the machine-readable `--report` file:
 
 ```text
-Scanned 8 file(s): 5 described, 3 not described.
+Scanned 8 file(s): 4 described, 1 linked, 1 referenced, 2 not described.
   no handler: 1
   archive, not opened: 1
-  duplicate by naming convention: 1
 ```
+
+A file reaches the document three ways, and the header names each one that
+happened. `described` means a handler read the file and built its record set.
+`linked` means the file is another described file in a different form — a
+`.csv.gz` beside its `.csv` — so its bytes are described and its structure is
+its twin's. `referenced` means another file's handler put it there: a WFDB
+header is read together with its `.dat` and `.atr`, and each gets a FileObject
+though nothing claims a `.dat` on its own. Only `not described` counts files the
+document does not carry, and the reason lines account for exactly those.
 
 `--report FILE` writes one JSON object per run. `outcome` and `reason` come from
 fixed vocabularies, so a tool can branch on them without parsing English:
@@ -17,24 +25,32 @@ fixed vocabularies, so a tool can branch on them without parsing English:
 ```json
 {
   "total": 8,
-  "described": 5,
-  "undescribed": 3,
-  "by_reason": {"no_handler": 1, "archive": 1, "duplicate_by_name": 1},
+  "described": 4,
+  "linked": 1,
+  "referenced": 1,
+  "undescribed": 2,
+  "by_reason": {"no_handler": 1, "archive": 1},
   "files": [
     {"path": "notes.txt", "outcome": "unclaimed", "reason": "no_handler",
      "detail": "no handler for this file type"},
     {"path": "sample.csv.gz", "outcome": "linked", "reason": "duplicate_by_name",
      "detail": "same logical name as sample.csv; linked by naming convention, content not verified",
-     "duplicate_of": "sample.csv"}
+     "duplicate_of": "sample.csv"},
+    {"path": "100.dat", "outcome": "referenced",
+     "detail": "described as part of 100.hea", "part_of": "100.hea"}
   ]
 }
 ```
 
-`outcome` is one of `described`, `linked`, `unclaimed`, `failed`, or
-`would_process` (`--dry-run` only). `reason` is one of `no_handler`, `archive`,
-`unsupported_input`, `claim_failed`, `extract_failed`, `build_failed`,
-`partition_schema_conflict`, `duplicate_by_name`, or `probable_duplicate`, and
-is absent on `described`.
+`described`, `linked`, `referenced` and `undescribed` sum to `total`, so a tool
+can check coverage without reading the file list. `by_reason` accounts for the
+`undescribed` alone.
+
+`outcome` is one of `described`, `linked`, `referenced`, `unclaimed`, `failed`,
+or `would_process` (`--dry-run` only). `reason` is one of `no_handler`,
+`archive`, `unsupported_input`, `claim_failed`, `extract_failed`,
+`build_failed`, `partition_schema_conflict`, `duplicate_by_name`, or
+`probable_duplicate`, and is absent on `described` and `referenced`.
 
 ## File types
 

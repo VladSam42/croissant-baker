@@ -10,9 +10,15 @@ from croissant_baker.handlers.base_handler import BuildResult, Declined, FileTyp
 from croissant_baker.handlers.csv_handler import CSVHandler
 from croissant_baker.handlers.registry import HandlerRegistry
 from croissant_baker.metadata_generator import MetadataGenerator
-from croissant_baker.scan import Outcome, Reason, ScanReport
+from croissant_baker.scan import Outcome, Reason, ScanEntry, ScanReport
 
-from tests.helpers import bake_with, bake_with_report, file_objects, write_wrapped
+from tests.helpers import (
+    DATA,
+    bake_with,
+    bake_with_report,
+    file_objects,
+    write_wrapped,
+)
 
 CSV = b"id,name\n1,Ada\n2,Grace\n"
 
@@ -255,3 +261,100 @@ def test_the_library_writes_nothing_to_stderr(tmp_path: Path) -> None:
 
     assert done.returncode == 0, done.stderr
     assert done.stderr == "", done.stderr
+
+
+MITDB = DATA / "mitdb_wfdb" / "physionet.org" / "files" / "mitdb" / "1.0.0"
+
+
+@pytest.fixture
+def wfdb_record(dataset: Path) -> Path:
+    """One WFDB record — a header read together with its .dat and .atr — and a CSV.
+
+    The shape behind the reviewer's MIT-BIH count: nothing claims a .dat on its
+    own, so it is UNCLAIMED, but the WFDB handler emits a FileObject for it and
+    the document carries it.
+    """
+    for name in ("100.hea", "100.dat", "100.atr"):
+        (dataset / name).write_bytes((MITDB / name).read_bytes())
+    write_wrapped(dataset, "good.csv", CSV)
+    return dataset
+
+
+def test_a_file_the_document_carries_is_not_undescribed(wfdb_record: Path) -> None:
+    """The defect the reviewer found: a file with a FileObject counted as missing."""
+    metadata, report = bake_with_report(wfdb_record)
+
+    urls = {f["contentUrl"] for f in file_objects(metadata)}
+    assert {"100.dat", "100.atr"} <= urls
+
+    assert sorted(e.name for e in report.referenced) == ["100.atr", "100.dat"]
+    assert report.undescribed == []
+    assert _entry(report, "100.dat").outcome is Outcome.REFERENCED
+
+
+def test_a_referenced_file_names_the_record_that_carries_it(
+    wfdb_record: Path,
+) -> None:
+    """Knowing a file is in the document is only useful with the parent."""
+    entry = _entry(bake_with_report(wfdb_record)[1], "100.dat")
+
+    assert entry.part_of is not None
+    assert entry.part_of.name == "100.hea"
+    assert "100.hea" in entry.detail
+    # A file in the document was not refused, so it carries no refusal reason.
+    assert entry.reason is None
+
+
+def test_the_summary_counts_what_the_document_holds(wfdb_record: Path) -> None:
+    report = bake_with_report(wfdb_record)[1]
+
+    assert report.summary_lines()[0] == (
+        "Scanned 4 file(s): 2 described, 2 referenced, 0 not described."
+    )
+
+
+def test_a_linked_twin_is_counted_as_linked_not_missing(dataset: Path) -> None:
+    """A .csv.gz beside its .csv has a FileObject with sameAs; it is in there."""
+    write_wrapped(dataset, "twin.csv", CSV)
+    write_wrapped(dataset, "twin.csv", CSV, ".gz")
+
+    report = bake_with_report(dataset)[1]
+
+    assert report.summary_lines() == [
+        "Scanned 2 file(s): 1 described, 1 linked, 0 not described."
+    ]
+
+
+@pytest.mark.parametrize("fixture", ["wfdb_record", "refusals"])
+def test_reason_lines_account_for_the_files_not_in_the_document(
+    fixture: str, request: pytest.FixtureRequest
+) -> None:
+    """A reason line is about a failure. Every failure gets exactly one."""
+    report = bake_with_report(request.getfixturevalue(fixture))[1]
+
+    assert sum(report.counts().values()) == len(report.undescribed)
+
+
+@pytest.mark.parametrize("fixture", ["wfdb_record", "refusals"])
+def test_the_report_and_the_document_agree_both_ways(
+    fixture: str, request: pytest.FixtureRequest
+) -> None:
+    """Neither a file in the document counted as missing, nor the reverse."""
+    metadata, report = bake_with_report(request.getfixturevalue(fixture))
+
+    urls = {f["contentUrl"] for f in file_objects(metadata)}
+    in_document = {
+        str(e.path) for e in report.described + report.linked + report.referenced
+    }
+
+    assert in_document == urls
+
+
+def test_a_described_file_cannot_be_demoted_to_referenced() -> None:
+    """The lifecycle is a guard, not a suggestion."""
+    entry = ScanEntry(path=Path("a.csv"))
+    entry.ready(handler=None, meta={})
+    entry.describe()
+
+    with pytest.raises(ValueError, match="cannot move from described"):
+        entry.referenced(ScanEntry(path=Path("b.hea")))

@@ -19,6 +19,9 @@ from croissant_baker.entries import (
     ScanEntry,
 )
 
+#: The three outcomes that mean a FileObject names the file.
+IN_DOCUMENT = frozenset({Outcome.DESCRIBED, Outcome.LINKED, Outcome.REFERENCED})
+
 
 @dataclass(frozen=True)
 class ScanReport:
@@ -43,9 +46,25 @@ class ScanReport:
         return [e for e in self.entries if e.outcome is Outcome.DESCRIBED]
 
     @property
+    def linked(self) -> List[ScanEntry]:
+        """Entries carried as another described file in a different form."""
+        return [e for e in self.entries if e.outcome is Outcome.LINKED]
+
+    @property
+    def referenced(self) -> List[ScanEntry]:
+        """Entries another file's handler put in the document."""
+        return [e for e in self.entries if e.outcome is Outcome.REFERENCED]
+
+    @property
     def undescribed(self) -> List[ScanEntry]:
-        """Entries that produced no record set, in scan order."""
-        return [e for e in self.entries if e.outcome is not Outcome.DESCRIBED]
+        """Entries the document does not carry, in scan order.
+
+        Membership of the document, not of a record set: a file with a
+        FileObject is in there whether it got there on its own
+        (``DESCRIBED``), as another form of a described file (``LINKED``), or
+        as part of a multi-file record (``REFERENCED``).
+        """
+        return [e for e in self.entries if e.outcome not in IN_DOCUMENT]
 
     @property
     def unresolved(self) -> List[ScanEntry]:
@@ -53,20 +72,35 @@ class ScanReport:
         return [e for e in self.entries if e.outcome in UNRESOLVED_OUTCOMES]
 
     def counts(self) -> Dict[Reason, int]:
-        """Number of undescribed entries per reason, in declaration order."""
-        tally = Counter(e.reason for e in self.entries if e.reason is not None)
+        """Number of entries per reason, in declaration order.
+
+        Over the undescribed only: a reason answers why a file is not in the
+        document, so counting one against a file that is in there says the
+        opposite of what it means. A linked file keeps its own reason — that
+        is the evidence it was linked on — and is not counted here.
+        """
+        tally = Counter(e.reason for e in self.undescribed if e.reason is not None)
         return {r: tally[r] for r in Reason if tally[r]}
 
     def summary_lines(self) -> List[str]:
-        """A header plus at most one line per reason."""
+        """A header plus at most one line per reason.
+
+        The header names every way into the document that happened, so a run
+        that linked or referenced files says so rather than folding them into
+        one count. ``described`` and ``not described`` are always stated; the
+        two middle buckets appear only when non-zero.
+        """
         if not self.entries:
             return ["Scanned 0 files."]
 
-        n_described = len(self.described)
-        lines = [
-            f"Scanned {self.total} file(s): "
-            f"{n_described} described, {self.total - n_described} not described."
-        ]
+        buckets = [f"{len(self.described)} described"]
+        if self.linked:
+            buckets.append(f"{len(self.linked)} linked")
+        if self.referenced:
+            buckets.append(f"{len(self.referenced)} referenced")
+        buckets.append(f"{len(self.undescribed)} not described")
+
+        lines = [f"Scanned {self.total} file(s): {', '.join(buckets)}."]
         lines.extend(
             f"  {REASON_LABELS[reason]}: {count}"
             for reason, count in self.counts().items()
@@ -77,11 +111,15 @@ class ScanReport:
         """Every discovered file with its outcome.
 
         ``reason`` is one of a finite set a caller can branch on; ``detail`` is
-        the sentence for a human.
+        the sentence for a human. ``described``, ``linked`` and ``referenced``
+        are the three ways into the document and sum with ``undescribed`` to
+        ``total``; ``by_reason`` accounts for the ``undescribed`` alone.
         """
         return {
             "total": self.total,
             "described": len(self.described),
+            "linked": len(self.linked),
+            "referenced": len(self.referenced),
             "undescribed": len(self.undescribed),
             "by_reason": {r.value: n for r, n in self.counts().items()},
             "files": [
@@ -95,6 +133,7 @@ class ScanReport:
                         if e.duplicate_of
                         else {}
                     ),
+                    **({"part_of": str(e.part_of.path)} if e.part_of else {}),
                 }
                 for e in self.entries
             ],

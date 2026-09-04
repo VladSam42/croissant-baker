@@ -231,3 +231,40 @@ def test_failed_bake_still_writes_a_report(tmp_path: Path) -> None:
     payload = json.loads(report_path.read_text())
     assert payload["described"] == 0
     assert payload["files"][0]["outcome"] == "unclaimed"
+
+
+def test_the_report_carries_every_bucket_and_the_parent_of_a_referenced_file(
+    tmp_path: Path,
+) -> None:
+    """A tool reading --report must be able to tell the three ways in apart."""
+    mitdb = (
+        Path(__file__).parent
+        / "data"
+        / "input"
+        / "mitdb_wfdb"
+        / "physionet.org"
+        / "files"
+        / "mitdb"
+        / "1.0.0"
+    )
+    dataset = tmp_path / "record"
+    dataset.mkdir()
+    for name in ("100.hea", "100.dat", "100.atr"):
+        (dataset / name).write_bytes((mitdb / name).read_bytes())
+    (dataset / "twin.csv").write_text("id\n1\n")
+    (dataset / "twin.csv.gz").write_bytes(__import__("gzip").compress(b"id\n1\n"))
+
+    report_path = tmp_path / "scan.json"
+    result = _run(dataset, tmp_path, "--report", str(report_path))
+    assert result.exit_code == 0
+
+    payload = json.loads(report_path.read_text())
+    assert payload["described"] == 2
+    assert payload["linked"] == 1
+    assert payload["referenced"] == 2
+    assert payload["undescribed"] == 0
+
+    files = {f["path"]: f for f in payload["files"]}
+    assert files["100.dat"]["outcome"] == "referenced"
+    assert files["100.dat"]["part_of"] == "100.hea"
+    assert files["twin.csv.gz"]["duplicate_of"] == "twin.csv"
