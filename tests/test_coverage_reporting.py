@@ -1,5 +1,6 @@
 """Every file is accounted for, and one failure costs one file."""
 
+import lzma
 import subprocess
 import sys
 from pathlib import Path
@@ -57,10 +58,14 @@ def test_the_rest_of_the_directory_is_still_described(report: ScanReport) -> Non
     assert sorted(e.name for e in report.described) == ["good.csv", "twin.csv"]
 
 
+#: The working states. A completed bake leaves no entry in any of them.
+WORKING = {Outcome.PENDING, Outcome.READY, Outcome.WOULD_PROCESS}
+
+
 def test_every_discovered_file_is_accounted_for(report: ScanReport) -> None:
     """PENDING, READY and WOULD_PROCESS are internal; none may reach a report."""
     assert report.total == 7
-    assert not report.unresolved
+    assert [e.name for e in report.entries if e.outcome in WORKING] == []
     assert all(e.reason is not None for e in report.undescribed)
 
 
@@ -126,12 +131,19 @@ def test_a_corrupt_wrapper_does_not_abort_the_bake(
 
 
 def test_a_claim_failure_is_reported_as_its_own_reason(corrupt_wrapper: Path) -> None:
-    """Distinct from an extraction failure: the file never reached a handler."""
+    """Distinct from an extraction failure: the file never reached a handler.
+
+    The entry does not keep the exception object. What the exception *said*
+    has to survive, or the report cannot explain itself.
+    """
+    with pytest.raises(Exception) as raised:  # noqa: PT011 - lzma's own type
+        with lzma.open(corrupt_wrapper / "bad.parquet.xz") as fh:
+            fh.read(1)
+
     entry = _entry(bake_with_report(corrupt_wrapper)[1], "bad.parquet.xz")
 
     assert entry.reason is Reason.CLAIM_FAILED
-    assert entry.detail
-    assert entry.error is not None
+    assert entry.detail == str(raised.value)
 
 
 class _BrokenCSVHandler(CSVHandler):

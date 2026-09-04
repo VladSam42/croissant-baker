@@ -11,13 +11,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List
 
-from croissant_baker.entries import (
-    REASON_LABELS,
-    UNRESOLVED_OUTCOMES,
-    Outcome,
-    Reason,
-    ScanEntry,
-)
+from croissant_baker.entries import REASON_LABELS, Outcome, Reason, ScanEntry
 
 #: The three outcomes that mean a FileObject names the file.
 IN_DOCUMENT = frozenset({Outcome.DESCRIBED, Outcome.LINKED, Outcome.REFERENCED})
@@ -65,11 +59,6 @@ class ScanReport:
         as part of a multi-file record (``REFERENCED``).
         """
         return [e for e in self.entries if e.outcome not in IN_DOCUMENT]
-
-    @property
-    def unresolved(self) -> List[ScanEntry]:
-        """Entries still in a working state. Empty after a completed bake."""
-        return [e for e in self.entries if e.outcome in UNRESOLVED_OUTCOMES]
 
     def counts(self) -> Dict[Reason, int]:
         """Number of entries per reason, in declaration order.

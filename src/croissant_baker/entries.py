@@ -49,9 +49,6 @@ class Outcome(str, Enum):
     WOULD_PROCESS = "would_process"
 
 
-UNRESOLVED_OUTCOMES = frozenset({Outcome.PENDING, Outcome.READY, Outcome.WOULD_PROCESS})
-
-
 class Reason(str, Enum):
     """Why a file was not described, as one of a finite set of categories.
 
@@ -136,7 +133,6 @@ class ScanEntry:
     detail: str = ""
     handler: Optional["FileTypeHandler"] = None
     meta: Optional[dict] = None
-    error: Optional[BaseException] = None
     duplicate_of: Optional["ScanEntry"] = None
     part_of: Optional["ScanEntry"] = None
 
@@ -186,7 +182,6 @@ class ScanEntry:
         self._move(Outcome.FAILED, Outcome.PENDING, Outcome.READY, Outcome.LINKED)
         self.reason = reason
         self.detail = str(error) or type(error).__name__
-        self.error = error
         self.meta = None
 
     def referenced(self, parent: "ScanEntry") -> None:

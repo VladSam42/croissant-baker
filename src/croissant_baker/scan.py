@@ -14,13 +14,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from croissant_baker.duplicates import PREFIX_BYTES, choose_primary, resolve_duplicates
-from croissant_baker.entries import (
-    REASON_LABELS,
-    UNRESOLVED_OUTCOMES,
-    Outcome,
-    Reason,
-    ScanEntry,
-)
+from croissant_baker.entries import REASON_LABELS, Outcome, Reason, ScanEntry
 from croissant_baker.files import discover_files
 from croissant_baker.report import ScanReport
 
@@ -30,7 +24,7 @@ def scan_directory(
     include_patterns: Optional[List[str]] = None,
     exclude_patterns: Optional[List[str]] = None,
 ) -> List[ScanEntry]:
-    """One unresolved entry per file found, in discovery order.
+    """One entry per file found, in discovery order, each still ``PENDING``.
 
     Discovery semantics are :func:`croissant_baker.files.discover_files`'s and
     are unchanged here.
@@ -52,7 +46,6 @@ def scan_directory(
 __all__ = [
     "PREFIX_BYTES",
     "REASON_LABELS",
-    "UNRESOLVED_OUTCOMES",
     "Outcome",
     "Reason",
     "ScanEntry",
