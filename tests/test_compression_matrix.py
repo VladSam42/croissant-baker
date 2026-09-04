@@ -16,7 +16,13 @@ from croissant_baker.handlers.registry import (
 )
 from croissant_baker.scan import Reason
 
-from tests.helpers import SAMPLES, bake, write_all, write_wrapped
+from tests.helpers import (
+    SAMPLES,
+    WRAPPER_SUFFIXES,
+    bake,
+    write_all,
+    write_wrapped,
+)
 
 
 def _handlers():
@@ -102,10 +108,18 @@ def _logical_includes(includes) -> list:
 
 
 @pytest.mark.parametrize("handler_name", sorted(SAMPLES))
-@pytest.mark.parametrize("suffix", ["", ".gz", ".bz2", ".xz"])
+@pytest.mark.parametrize("suffix", WRAPPER_SUFFIXES)
 def test_wrapped_is_described_like_plain(
     handler_name: str, suffix: str, tmp_path: Path
 ) -> None:
+    """The wrapper is transport: the same files described twice, once wrapped,
+    must produce the same document but for the media types.
+
+    No ``suffix=""`` column. It compared a document to a copy of itself, which
+    ``_normalise`` sorts into agreement, and its media-type half reduced to
+    ``_formats(plain) == _formats(plain)``. The two coverage assertions were
+    the only thing it carried, so they run on the plain bake here instead.
+    """
     files = SAMPLES[handler_name]()
 
     plain_dir = tmp_path / "plain"
@@ -126,16 +140,15 @@ def test_wrapped_is_described_like_plain(
     # asserted rather than normalised away. A handler fusing the two — the
     # application/x-nifti+gzip bug — fails here even if it never writes a
     # suffix literal for the grep check to find.
-    expected = _formats(plain)
-    if suffix:
-        wrapper = next(c for c in compression.compressions() if c.suffix == suffix)
-        expected = [formats + [wrapper.media_type] for formats in expected]
+    wrapper = next(c for c in compression.compressions() if c.suffix == suffix)
+    expected = [formats + [wrapper.media_type] for formats in _formats(plain)]
     assert _formats(wrapped) == expected, (
         f"{handler_name}: {suffix} reported {_formats(wrapped)}"
     )
 
-    _assert_every_stored_file_is_covered(wrapped, wrapped_dir)
-    _assert_no_wrapper_is_claimed_without_a_file(wrapped, wrapped_dir)
+    for document, directory in ((plain, plain_dir), (wrapped, wrapped_dir)):
+        _assert_every_stored_file_is_covered(document, directory)
+        _assert_no_wrapper_is_claimed_without_a_file(document, directory)
 
 
 def _assert_no_wrapper_is_claimed_without_a_file(

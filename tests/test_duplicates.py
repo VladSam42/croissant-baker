@@ -103,14 +103,31 @@ def test_two_wrappers_with_different_bytes_stay_distinct(dataset: Path) -> None:
     assert len(_ids(metadata)) == 2
 
 
-def test_compressed_size_is_never_taken_as_evidence(dataset: Path) -> None:
-    """Two payloads that compress to the same length are still different files."""
-    write_wrapped(dataset, "sample.csv", b"id,name\n" + b"1,aaaa\n" * 500, ".gz")
-    write_wrapped(dataset, "sample.csv", b"id,name\n" + b"1,bbbb\n" * 500, ".xz")
+def test_a_compressed_candidate_is_never_judged_on_its_stored_size(
+    dataset: Path, monkeypatch
+) -> None:
+    """gzip and xz sizes are not comparable, so the stat() shortcut is for two
+    plain files only. Asserted on the mechanism: the outcome alone cannot tell
+    a size check that happened to agree from one that never ran.
+
+    Two logical names, so the pair reaches the branch that owns the shortcut —
+    a .csv.gz beside a .csv.xz shares one logical name and is settled before it.
+    """
+    from croissant_baker import duplicates
+
+    write_wrapped(dataset, "sample.csv", CSV, ".gz")
+    write_wrapped(dataset, "sample.tsv", OTHER_CSV, ".xz")
+
+    sized = []
+    real = duplicates._stored_size
+    monkeypatch.setattr(
+        duplicates, "_stored_size", lambda p: sized.append(p) or real(p)
+    )
 
     assert all(
         e.outcome is Outcome.DESCRIBED for e in bake_with_report(dataset)[1].entries
     )
+    assert sized == []
 
 
 def test_a_csv_and_a_tsv_of_the_same_data_stay_distinct(same_stem: Path) -> None:
