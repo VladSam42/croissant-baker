@@ -13,6 +13,8 @@ from croissant_baker.handlers.dicom_handler import (
 )
 from croissant_baker.sources import make_source
 
+from tests.helpers import bake
+
 
 def _make_dicom(
     path: Path,
@@ -211,3 +213,21 @@ def test_build_croissant_description_contains_modality(handler: DICOMHandler) ->
     metas = [_dicom_meta("a.dcm", modality="PT")]
     _, record_sets = handler.build_croissant(metas, ["file_0"])
     assert "PT" in record_sets[0].description
+
+
+def test_a_bake_says_how_many_dcm_files_lacked_the_preamble(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """A directory of DICOMDIR fragments and broken exports bakes the valid
+    files and says, once, how many it passed over. Without the line, a
+    half-described directory looks complete."""
+    _make_dicom(tmp_path / "good.dcm")
+    # .dcm-named, no DICM preamble at offset 128.
+    (tmp_path / "fragment_a.dcm").write_bytes(b"\x00" * 256)
+    (tmp_path / "fragment_b.dcm").write_bytes(b"random bytes that are not dicom")
+
+    bake(tmp_path)
+
+    assert (
+        "skipped 2 DICOM file(s) without the DICM preamble" in capsys.readouterr().out
+    )
