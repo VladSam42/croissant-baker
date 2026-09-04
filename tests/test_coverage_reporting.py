@@ -1,6 +1,7 @@
 """Every file is accounted for, and one failure costs one file."""
 
-import logging
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -8,11 +9,7 @@ import pytest
 from croissant_baker.handlers.base_handler import BuildResult, Declined, FileTypeHandler
 from croissant_baker.handlers.csv_handler import CSVHandler
 from croissant_baker.handlers.registry import HandlerRegistry
-from croissant_baker.handlers.tsv_handler import TSVHandler
-from croissant_baker.metadata_generator import (
-    MAX_UNDESCRIBED_WARNINGS,
-    MetadataGenerator,
-)
+from croissant_baker.metadata_generator import MetadataGenerator
 from croissant_baker.scan import Outcome, Reason, ScanReport
 
 from tests.helpers import bake_with, bake_with_report, file_objects, write_wrapped
@@ -153,6 +150,8 @@ def test_an_assembly_failure_costs_its_batch_and_nothing_else(
 
     assert _entry(report, "a.csv").outcome is Outcome.FAILED
     assert _entry(report, "a.csv").reason is Reason.BUILD_FAILED
+    # Which files a failing batch took down, and why, with no log to read.
+    assert "assembly exploded" in _entry(report, "a.csv").detail
     # A FileObject with no record set is worse than no entry at all.
     assert [d["name"] for d in file_objects(metadata)] == ["b.jsonl"]
     assert [rs["@id"] for rs in metadata["recordSet"]] == ["b.jsonl"]
@@ -162,7 +161,7 @@ def test_an_assembly_failure_costs_its_batch_and_nothing_else(
 def test_every_batch_failing_is_an_error_not_an_empty_document(
     dataset: Path,
 ) -> None:
-    from croissant_baker.handlers.registry import HandlerRegistry, builtin_handlers
+    from croissant_baker.handlers.registry import builtin_handlers
 
     write_wrapped(dataset, "only.csv", CSV)
     generator = MetadataGenerator(
@@ -175,53 +174,6 @@ def test_every_batch_failing_is_an_error_not_an_empty_document(
         generator.generate_metadata()
 
     assert _entry(generator.scan_report, "only.csv").outcome is Outcome.FAILED
-
-
-def test_an_undescribed_file_is_warned_about_as_it_is_scanned(tmp_path, caplog):
-    """The summary arrives at the end; a long bake needs to say so as it goes."""
-    (tmp_path / "data.csv").write_text("a,b\n1,2\n")
-    (tmp_path / "notes.md").write_text("free text")
-
-    with caplog.at_level(logging.WARNING, logger="croissant_baker"):
-        MetadataGenerator(dataset_path=str(tmp_path)).generate_metadata()
-
-    assert any(
-        "notes.md" in r.getMessage() and "no handler" in r.getMessage()
-        for r in caplog.records
-    ), [r.getMessage() for r in caplog.records]
-
-
-def test_a_file_that_fails_to_parse_names_itself(tmp_path, caplog):
-    """The message that went missing in the refactor: which file, and why."""
-    (tmp_path / "ok.csv").write_text("a,b\n1,2\n")
-    # Two header columns, three in the row: malformed however it is read.
-    (tmp_path / "broken.csv").write_text("a,b\n1,2,3\n")
-
-    with caplog.at_level(logging.WARNING, logger="croissant_baker"):
-        MetadataGenerator(dataset_path=str(tmp_path)).generate_metadata()
-
-    messages = [r.getMessage() for r in caplog.records]
-    assert any("broken.csv" in m and "CSV parse error" in m for m in messages), messages
-
-
-def test_a_batch_that_fails_to_build_names_its_files(tmp_path, caplog):
-    """A handler failing as a whole must still say which files it took down."""
-
-    class Exploding(CSVHandler):
-        def build_croissant(self, file_metas, file_ids):
-            raise RuntimeError("boom")
-
-    (tmp_path / "one.csv").write_text("a,b\n1,2\n")
-    (tmp_path / "two.tsv").write_text("a\tb\n1\t2\n")
-
-    with caplog.at_level(logging.WARNING, logger="croissant_baker"):
-        MetadataGenerator(
-            dataset_path=str(tmp_path),
-            handlers=HandlerRegistry([Exploding(), TSVHandler()]),
-        ).generate_metadata()
-
-    messages = [r.getMessage() for r in caplog.records]
-    assert any("one.csv" in m and "boom" in m for m in messages), messages
 
 
 class _BadReturnHandler(FileTypeHandler):
@@ -278,30 +230,28 @@ def test_a_malformed_handler_return_costs_its_batch_only(built, dataset) -> None
     assert [rs["@id"] for rs in metadata["recordSet"]] == ["keep"]
 
 
-def test_per_file_warnings_are_capped_across_every_source(dataset, caplog) -> None:
-    """The cap is a promise about output volume, so a handler's own warnings
-    count against it too."""
+def test_the_library_writes_nothing_to_stderr(tmp_path: Path) -> None:
+    """A library that logs to a terminal it does not own is a library bug.
 
-    write_wrapped(dataset, "keep.csv", CSV)
-    for i in range(70):
-        # No PAR1 header: the handler warns as it declines, and the
-        # generator warns again as the file goes undescribed.
-        write_wrapped(dataset, f"broken{i:03d}.parquet", b"NOPE not a parquet file")
+    Out of process, because pytest holds a root handler: in-process,
+    ``logging.lastResort`` never fires and the check cannot fail.
+    """
+    dataset = tmp_path / "quiet"
+    dataset.mkdir()
+    write_wrapped(dataset, "good.csv", CSV)
+    write_wrapped(dataset, "mystery.xyz", b"?")
 
-    with caplog.at_level("WARNING"):
-        bake_with_report(dataset)
-
-    named = [r for r in caplog.records if "broken" in r.getMessage()]
-    assert len(named) <= MAX_UNDESCRIBED_WARNINGS + 1, len(named)
-    # Extraction runs on a pool, so which record carries the notice is a race;
-    # that exactly one does is not.
-    assert (
-        len(
-            [
-                r
-                for r in named
-                if "further per-file warnings suppressed" in r.getMessage()
-            ]
-        )
-        == 1
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from croissant_baker.metadata_generator import MetadataGenerator;"
+            f"MetadataGenerator(dataset_path={str(dataset)!r}, name='t')"
+            ".generate_metadata()",
+        ],
+        capture_output=True,
+        text=True,
     )
+
+    assert done.returncode == 0, done.stderr
+    assert done.stderr == "", done.stderr

@@ -2,7 +2,7 @@
 
 croissant-baker detects file types automatically. Handlers are checked in the order listed below — the first match wins.
 
-Nothing is skipped in silence. Each file that goes undescribed is named on the log as the run passes over it — so a long bake says so while it is still running — and counted in the closing coverage summary with the reason. Per-file warnings stop after the first 50, since past that the summary is the better account. The full list is under `--verbose`, or in the machine-readable `--report` file:
+Nothing is skipped in silence, and nothing is reported one line per file by default. Every file that goes undescribed is counted in the closing coverage summary under the reason it was passed over. The summary is a fixed size — a header plus at most one line per reason — so a directory with one undescribed file and one with ten thousand print the same shape. The full list is under `--verbose`, or in the machine-readable `--report` file:
 
 ```text
 Scanned 8 file(s): 5 described, 3 not described.

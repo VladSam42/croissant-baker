@@ -149,7 +149,8 @@ def _echo_scan_coverage(
 
     The default is a fixed-size summary: a header plus at most one line per
     reason, so a directory with one undescribed file and one with ten thousand
-    print the same shape. Per-file detail goes to ``--report`` or ``--verbose``.
+    print the same shape. This is the only place a file is named one per line,
+    and only under ``--verbose``; the machine-readable form is ``--report``.
     Diagnostics a parser emits on its own are outside this.
 
     Accepts ``None`` so the failure paths can call it unconditionally.
@@ -682,7 +683,7 @@ def main(
         False,
         "--verbose",
         "-v",
-        help="List each undescribed file and its reason, instead of a summary count.",
+        help="Also list each undescribed file and its reason, not the summary alone.",
     ),
 ) -> None:
     """🥐 **Croissant Baker** - Generate rich metadata for your datasets"""

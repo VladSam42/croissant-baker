@@ -1,6 +1,8 @@
 """The CLI states coverage: how much was described, and how to see what was not."""
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -59,14 +61,65 @@ def test_the_coverage_section_does_not_grow_with_the_dataset(
             write(dataset / f"undescribed{i}")
         result = _run(dataset, dataset)
         assert result.exit_code == 0
-        lines = result.stdout.splitlines()
-        start = next(i for i, line in enumerate(lines) if "Scanned" in line)
-        return lines[start:]
+        return (result.stdout + result.stderr).splitlines()
 
     few, many = coverage_for(2), coverage_for(60)
 
-    assert len(few) == len(many)
-    assert "60 not described" in many[0]
+    assert len(few) == len(many), "\n".join(many)
+    assert any("60 not described" in line for line in many)
+
+
+def test_a_default_run_names_no_undescribed_file(
+    mixed_dataset: Path, tmp_path: Path
+) -> None:
+    """Quiet by default: the summary counts them, nothing lists them.
+
+    Run out of process. In-process the check is vacuous: pytest's logging
+    plugin holds a root handler, so ``logging.lastResort`` never fires and a
+    stray warning never reaches the stderr a runner would capture.
+    """
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "croissant_baker",
+            "--input",
+            str(mixed_dataset),
+            "--output",
+            str(tmp_path / "out.jsonld"),
+            "--creator",
+            "Tester",
+            "--no-validate",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert done.returncode == 0, done.stderr
+    everything = done.stdout + done.stderr
+    assert "no handler for file type" not in everything
+    assert "opaque.bin" not in everything
+    assert "broken.json" not in everything
+
+
+def test_verbose_paths_are_dataset_relative_and_appear_in_the_report(
+    mixed_dataset: Path, tmp_path: Path
+) -> None:
+    """The path a reader is shown is the key they can look up in --report."""
+    report_path = tmp_path / "scan.json"
+    result = _run(mixed_dataset, tmp_path, "--verbose", "--report", str(report_path))
+
+    assert result.exit_code == 0
+    known = {f["path"] for f in json.loads(report_path.read_text())["files"]}
+    shown = [
+        line.split("File: ", 1)[1].strip()
+        for line in result.stdout.splitlines()
+        if "File: " in line
+    ]
+
+    assert shown, result.stdout
+    assert set(shown) <= known, (shown, known)
+    assert not any(Path(p).is_absolute() for p in shown)
 
 
 def test_undescribed_files_prompt_for_detail(

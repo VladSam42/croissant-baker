@@ -65,7 +65,7 @@ $ croissant-baker [OPTIONS] COMMAND [ARGS]...
 * `-E, --exclude TEXT`: Glob pattern to exclude (e.g., '*.tmp'). Can be used multiple times.
 * `--dry-run`: Perform a dry run to list matching files without generating metadata.
 * `--report PATH`: Write a JSON scan report naming every file found and its outcome.
-* `-v, --verbose`: List each undescribed file and its reason, instead of a summary count.
+* `-v, --verbose`: Also list each undescribed file and its reason, not the summary alone.
 * `--help`: Show this message and exit.
 
 **Commands**:
