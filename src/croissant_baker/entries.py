@@ -187,14 +187,24 @@ class ScanEntry:
     def referenced(self, parent: "ScanEntry") -> None:
         """Record that ``parent``'s handler put this file in the document.
 
-        Legal only from ``PENDING`` and ``UNCLAIMED``: a file that reached a
-        handler of its own has already resolved, and a file that failed stays
-        failed. The refusal reason goes — the file was not refused anything.
+        Reachable from ``FAILED`` as well as ``PENDING`` and ``UNCLAIMED``:
+        whether a file could be read on its own is a different question from
+        whether the document carries it, and a handler reading a multi-file
+        record answers the second one. What its own failure said is kept in
+        ``detail``, since nothing else records that reading it was attempted.
+
+        The reason goes either way. A reason says why the document does not
+        carry a file, and this one is in it.
         """
-        self._move(Outcome.REFERENCED, Outcome.PENDING, Outcome.UNCLAIMED)
+        failure = self.detail if self.outcome is Outcome.FAILED else ""
+        self._move(
+            Outcome.REFERENCED, Outcome.PENDING, Outcome.UNCLAIMED, Outcome.FAILED
+        )
         self.part_of = parent
         self.reason = None
         self.detail = f"described as part of {parent.path}"
+        if failure:
+            self.detail += f"; reading it on its own failed: {failure}"
 
     def linked(self, primary: "ScanEntry", reason: Reason, detail: str) -> None:
         """Record that this file duplicates ``primary``.

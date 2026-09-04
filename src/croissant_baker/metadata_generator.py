@@ -40,6 +40,10 @@ from croissant_baker.scan import (
 
 logger = logging.getLogger(__name__)
 
+#: Outcomes a file can still be found in the document under another file's
+#: record: nothing claimed it, or reading it on its own failed.
+_CARRIED_BY_ANOTHER = (Outcome.UNCLAIMED, Outcome.FAILED)
+
 # conformsTo URIs declared on the Dataset. mlcroissant defaults conforms_to to
 # 1.0 even on 1.1.x — passing CROISSANT_CONFORMS_TO explicitly is the single
 # source of truth for our declared spec version. RAI_CONFORMS_TO is appended
@@ -428,19 +432,15 @@ class MetadataGenerator:
         if not any(e.outcome is Outcome.DESCRIBED for e in surviving):
             raise ValueError("No supported files found in the dataset")
 
-        # A handler can describe a file through another: WFDB reads a header
-        # together with its .dat and .atr and emits a FileObject for each.
-        # Nothing claims those siblings on their own, so the scan left them
-        # UNCLAIMED — and the document carries them. Reconcile here, where the
-        # staged FileObjects are final, so coverage counts what was written
-        # rather than what was claimed.
+        # Reconciled here, where the staged FileObjects are final, so coverage
+        # counts what was written rather than what was claimed.
         by_scanned_path = {str(e.path): e for e in entries}
         for parent in surviving:
             # objects[0] is the parent's own FileObject; the rest are the
             # siblings its handler read along with it.
             for obj in staged.get(parent, [])[1:]:
                 sibling = by_scanned_path.get(obj.content_url)
-                if sibling is not None and sibling.outcome is Outcome.UNCLAIMED:
+                if sibling is not None and sibling.outcome in _CARRIED_BY_ANOTHER:
                     sibling.referenced(parent)
 
         # distributions holds both FileObjects and FileSets — the full contents

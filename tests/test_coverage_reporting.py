@@ -1,5 +1,6 @@
 """Every file is accounted for, and one failure costs one file."""
 
+import hashlib
 import lzma
 import subprocess
 import sys
@@ -370,3 +371,64 @@ def test_a_described_file_cannot_be_demoted_to_referenced() -> None:
 
     with pytest.raises(ValueError, match="cannot move from described"):
         entry.referenced(ScanEntry(path=Path("b.hea")))
+
+
+class _PairHandler(CSVHandler):
+    """Describes ``good.csv`` and emits ``bad.csv`` alongside it as a related
+    FileObject, while ``bad.csv`` fails to read on its own."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self._root = root
+
+    def extract(self, source, **kwargs):
+        if source.name == "bad.csv":
+            raise ValueError("bad.csv cannot be read on its own")
+        meta = super().extract(source, **kwargs)
+        sibling = self._root / "bad.csv"
+        meta["related_files"] = [
+            {
+                "path": str(sibling),
+                "name": "bad.csv",
+                "encoding": "text/csv",
+                "size": sibling.stat().st_size,
+                "sha256": hashlib.sha256(sibling.read_bytes()).hexdigest(),
+            }
+        ]
+        return meta
+
+
+@pytest.fixture
+def failed_but_emitted(dataset: Path) -> Path:
+    write_wrapped(dataset, "good.csv", CSV)
+    write_wrapped(dataset, "bad.csv", CSV)
+    return dataset
+
+
+def test_a_file_that_failed_alone_is_still_in_the_document(
+    failed_but_emitted: Path,
+) -> None:
+    """Membership of the document is not the same question as whether the file
+    could be read on its own. A handler that emits it anyway puts it in."""
+    metadata, report = bake_with(
+        [_PairHandler(failed_but_emitted)], failed_but_emitted
+    )
+
+    assert "bad.csv" in {f["contentUrl"] for f in file_objects(metadata)}
+    assert _entry(report, "bad.csv").outcome is Outcome.REFERENCED
+    assert report.undescribed == []
+    assert report.summary_lines()[0] == (
+        "Scanned 2 file(s): 1 described, 1 referenced, 0 not described."
+    )
+
+
+def test_a_referenced_file_keeps_what_its_own_failure_said(
+    failed_but_emitted: Path,
+) -> None:
+    """The diagnostic is the only record that reading it was even attempted."""
+    _, report = bake_with([_PairHandler(failed_but_emitted)], failed_but_emitted)
+    entry = _entry(report, "bad.csv")
+
+    assert "good.csv" in entry.detail
+    assert "cannot be read on its own" in entry.detail
+    assert entry.reason is None
